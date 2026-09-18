@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 
 from fastapi.testclient import TestClient
+import main
 from main import app
 from solver import load_instance_from_dir, parse_instance, solve_scenario, REQUIRED_HEADERS, OUTPUT_HEADERS
 from solver.loader import CsvSchemaError, validate_instance
@@ -152,6 +153,7 @@ class InputAndApiTests(unittest.TestCase):
     def setUp(self):
         self.files = {name: (DATA / name).read_text() for name in REQUIRED_HEADERS}
         self.client = TestClient(app)
+        main._ACTIVE_RUN = None  # activation is process-wide state; start each test clean
 
     def test_invalid_numbers_duplicates_and_cycles(self):
         bad = self.files.copy()
@@ -193,6 +195,26 @@ class InputAndApiTests(unittest.TestCase):
                 rows = list(reader)
                 if filename == "SCHEDULE_ACCESS.csv":
                     self.assertIn("UPLOADED_ACTIVITY", {r["activity_id"] for r in rows})
+
+    def test_preview_then_activate_becomes_the_active_schedule(self):
+        self.assertEqual(self.client.get("/api/schedule/active").status_code, 204)
+        self.assertEqual(self.client.post("/api/schedule/activate", json={"run_id": "nope"}).status_code, 404)
+        self.files["08_ACTIVITY_DETAILS.csv"] = self.files["08_ACTIVITY_DETAILS.csv"].replace("A001", "PREVIEWED")
+        uploads = [("files", (name, raw, "text/csv")) for name, raw in self.files.items()]
+        preview = self.client.post("/api/reschedule", data={"scenario": "B"}, files=uploads).json()
+        evaluation = preview["evaluation"]
+        self.assertEqual(evaluation["access_nights_total"], len(preview["tasks"]))
+        self.assertEqual(evaluation["objective_score"], preview["soft_scores"]["objective_score"])
+        self.assertEqual(evaluation["feasible"], preview["feasible"])
+        # a later solve does not change what is active until it is explicitly implemented
+        activated = self.client.post("/api/schedule/activate", json={"run_id": preview["run_id"]})
+        self.assertEqual(activated.status_code, 200, activated.text)
+        self.client.get("/api/schedule?scenario=A")
+        active = self.client.get("/api/schedule/active").json()
+        self.assertEqual(active["run_id"], preview["run_id"])
+        self.assertEqual(active["scenario"], "B")
+        self.assertTrue(active["active"])
+        self.assertIn("PREVIEWED", {t["activity_id"] for t in active["tasks"]})
 
     def test_missing_duplicate_uploads_and_bad_scenario(self):
         self.assertEqual(self.client.get("/api/schedule?scenario=Z").status_code, 400)

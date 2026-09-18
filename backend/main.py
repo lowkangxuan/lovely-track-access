@@ -10,7 +10,9 @@ Endpoints
 GET  /api/health          liveness + which solver is registered per scenario
 GET  /api/schemas         the 8 required CSV headers (the UI validates against this)
 GET  /api/schedule        baseline schedule from the bundled reference instance
-POST /api/reschedule      multipart: 8 instance CSVs + `scenario` -> full schedule
+POST /api/reschedule      multipart: 8 instance CSVs + `scenario` -> full schedule (a preview)
+POST /api/schedule/activate  {run_id} -> promote a previewed run to the active schedule
+GET  /api/schedule/active    the active schedule, 204 until one has been activated
 GET  /api/download/{scenario}/{file}   SCHEDULE_ACCESS | SCHEDULE_OCCUPANCY | RESULTS
 """
 
@@ -27,7 +29,8 @@ from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from solver import (
@@ -63,8 +66,11 @@ app.add_middleware(
 
 # in-memory store of the most recent solve per scenario, for CSV download
 _LAST_RUN: Dict[str, dict] = {}
-_RUNS: Dict[str, tuple[str, dict]] = {}
+# run_id -> {"scenario", "csv": {file: rows}, "view": dashboard view-model}
+_RUNS: Dict[str, dict] = {}
+_ACTIVE_RUN: Optional[str] = None  # run_id promoted via POST /api/schedule/activate
 _RUN_LOCK = Lock()
+_MAX_RUNS = 100
 
 
 # --------------------------------------------------------------------------- #
@@ -173,11 +179,23 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
         "feasible": out.feasible,
         "hard_violations": [v.model_dump() for v in out.hard_violations],
         "soft_scores": out.soft_scores.model_dump(),
+        # compact headline the editor's preview panel renders as-is
+        "evaluation": {
+            "feasible": out.feasible,
+            "hard_violation_count": len(out.hard_violations),
+            "access_nights_total": len(out.schedule_access),
+            "overrun_days_total": out.soft_scores.overrun_days_total,
+            "contracts_overrunning": out.soft_scores.contracts_overrunning,
+            "eclo_nights_total": out.soft_scores.eclo_nights_total,
+            "excess_access_nights_total": out.soft_scores.excess_access_nights_total,
+            "objective_score": out.soft_scores.objective_score,
+        },
         "detail": out.detail,
         "tasks": tasks,
         "network": {
             "lines": [line.model_dump() for line in data.lines],
             "stations": [station.model_dump() for station in data.stations],
+            "sectors": [sector.model_dump() for sector in data.sectors],
         },
         "results": [r.model_dump() for r in out.results],
         "contracts": [
@@ -199,19 +217,32 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
     }
 
 
-def _store_run(out: SolveOutput) -> str:
-    run = {
+def _store_run(out: SolveOutput, view: dict) -> str:
+    """Remember a solve (CSV rows + view-model) under a fresh run_id; the active run is never evicted."""
+    csv_rows = {
         "SCHEDULE_ACCESS.csv": [r.model_dump() for r in out.schedule_access],
         "SCHEDULE_OCCUPANCY.csv": [r.model_dump() for r in out.schedule_occupancy],
         "RESULTS.csv": [r.model_dump() for r in out.results],
     }
     run_id = uuid.uuid4().hex
+    view["run_id"] = run_id
     with _RUN_LOCK:
-        _LAST_RUN[out.scenario] = run
-        _RUNS[run_id] = (out.scenario, run)
-        while len(_RUNS) > 100:
-            del _RUNS[next(iter(_RUNS))]
+        _LAST_RUN[out.scenario] = csv_rows
+        _RUNS[run_id] = {"scenario": out.scenario, "csv": csv_rows, "view": view}
+        evictable = [k for k in _RUNS if k != _ACTIVE_RUN and k != run_id]
+        while len(_RUNS) > _MAX_RUNS and evictable:
+            del _RUNS[evictable.pop(0)]
     return run_id
+
+
+def _solve_and_store(scenario: str, data: InstanceData, source: str) -> dict:
+    started = time.perf_counter()
+    out = solve_scenario(scenario, data)
+    vm = build_view_model(data, out)
+    vm["runtime_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    vm["source"] = source
+    _store_run(out, vm)
+    return vm
 
 
 # --------------------------------------------------------------------------- #
@@ -244,14 +275,34 @@ def default_schedule(scenario: str = "A") -> dict:
         data = load_instance_from_dir(str(DATA_DIR))
     except CsvSchemaError as exc:
         raise HTTPException(status_code=503, detail=f"Bundled instance unavailable: {exc}")
-    started = time.perf_counter()
-    out = solve_scenario(scenario, data)
-    run_id = _store_run(out)
-    vm = build_view_model(data, out)
-    vm["run_id"] = run_id
-    vm["runtime_ms"] = round((time.perf_counter() - started) * 1000, 1)
-    vm["source"] = "bundled-reference-instance"
-    return vm
+    return _solve_and_store(scenario, data, "bundled-reference-instance")
+
+
+class ActivateRequest(BaseModel):
+    run_id: str
+
+
+@app.post("/api/schedule/activate")
+def activate_schedule(body: ActivateRequest) -> dict:
+    """Promote a previewed run (from /api/reschedule or /api/schedule) to the active schedule."""
+    global _ACTIVE_RUN
+    with _RUN_LOCK:
+        run = _RUNS.get(body.run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Unknown or expired run_id '{body.run_id}'")
+        _ACTIVE_RUN = body.run_id
+        _LAST_RUN[run["scenario"]] = run["csv"]
+        return {**run["view"], "active": True}
+
+
+@app.get("/api/schedule/active")
+def active_schedule():
+    """The schedule last implemented from the editor; 204 (no body) until one has been activated."""
+    with _RUN_LOCK:
+        run = _RUNS.get(_ACTIVE_RUN) if _ACTIVE_RUN else None
+    if run is None:
+        return Response(status_code=204)
+    return {**run["view"], "active": True}
 
 
 @app.post("/api/reschedule")
@@ -319,18 +370,10 @@ async def reschedule(
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=422, detail={"message": f"Could not parse instance: {exc}"})
 
-    started = time.perf_counter()
     try:
-        out = await run_in_threadpool(solve_scenario, scenario, data)
+        return await run_in_threadpool(_solve_and_store, scenario, data, "uploaded-instance")
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail={"message": f"Solver failed: {exc}"})
-
-    run_id = _store_run(out)
-    vm = build_view_model(data, out)
-    vm["run_id"] = run_id
-    vm["runtime_ms"] = round((time.perf_counter() - started) * 1000, 1)
-    vm["source"] = "uploaded-instance"
-    return vm
 
 
 @app.get("/api/download/{scenario}/{filename}")
@@ -340,7 +383,7 @@ def download(scenario: str, filename: str, run_id: Optional[str] = None) -> Stre
         raise HTTPException(status_code=404, detail=f"Unknown output file '{filename}'")
     with _RUN_LOCK:
         saved = _RUNS.get(run_id) if run_id else None
-        run = (saved[1] if saved and saved[0] == scenario else None) if run_id else _LAST_RUN.get(scenario)
+        run = (saved["csv"] if saved and saved["scenario"] == scenario else None) if run_id else _LAST_RUN.get(scenario)
     if not run:
         raise HTTPException(status_code=404, detail=f"No run stored for scenario {scenario}")
 

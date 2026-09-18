@@ -6,8 +6,6 @@ import {
   ChevronRight,
   ClipboardList,
   Clock,
-  Download,
-  FileSpreadsheet,
   Gauge,
   KeyRound,
   Layers,
@@ -18,15 +16,15 @@ import {
   RefreshCw,
   Shield,
   TrainFront,
-  Upload,
   UserRound,
   X,
-  XCircle,
 } from "lucide-react";
 
+import EditorView from "./EditorView.jsx";
 import Metric from "./Metric.jsx";
+import TrackMap from "./TrackMap.jsx";
 import { Dialog, KdaDialog, LocationMap, MonthlyView, ScheduleToolbar, SearchDialog } from "./ScheduleControls.jsx";
-import { activityPriority, EMPTY_FILTERS, matches } from "./schedule-utils.js";
+import { activityPriority, EMPTY_FILTERS, matches, occupancyOverlay } from "./schedule-utils.js";
 
 /* ------------------------------------------------------------------ *
  * Configuration                                                      *
@@ -51,11 +49,8 @@ const USERS = {
   },
 };
 
-const SCENARIOS = [
-  { id: "A", name: "Scenario A", label: "Strict Supply, Flexible Schedule", hint: "Capacity is rigid. ECLO forbidden. Minimise priority-weighted overrun." },
-  { id: "B", name: "Scenario B", label: "Strict Schedule, Flexible Supply", hint: "Planned dates are rigid. Pay with extra access-nights and ECLO." },
-  { id: "C", name: "Scenario C", label: "Elastic Supply, Flexible Schedule", hint: "Both flex. +1 excess access-night per location-week allowed." },
-];
+/** Solver output CSVs exposed by GET /api/download/{scenario}/{file}. */
+const OUTPUT_FILES = ["SCHEDULE_ACCESS.csv", "SCHEDULE_OCCUPANCY.csv", "RESULTS.csv"];
 
 /** Mirror of the backend schema registry; refreshed from GET /api/schemas at boot. */
 const FALLBACK_HEADERS = {
@@ -95,31 +90,6 @@ const priorityTone = (p) =>
 
 const delayTone = (d) =>
   d > 28 ? "text-rose-300" : d > 0 ? "text-amber-300" : "text-emerald-300";
-
-/** Parse only the header row — enough to validate, cheap on large files. */
-function readHeaderRow(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Could not read file"));
-    reader.onload = () => {
-      const text = String(reader.result || "").replace(/^﻿/, "");
-      const firstLine = text.split(/\r?\n/).find((l) => l.trim().length > 0) || "";
-      const rows = text.split(/\r?\n/).filter((l) => l.trim().length > 0).length - 1;
-      resolve({
-        headers: firstLine.split(",").map((h) => h.trim().replace(/^"|"$/g, "")),
-        rowCount: Math.max(0, rows),
-      });
-    };
-    reader.readAsText(file.slice(0, 64 * 1024));
-  });
-}
-
-function matchSchemaName(fileName, schemaNames) {
-  const base = (fileName || "").split(/[\\/]/).pop();
-  const exact = schemaNames.find((n) => n.toLowerCase() === base.toLowerCase());
-  if (exact) return exact;
-  return schemaNames.find((n) => base.toLowerCase().endsWith(n.toLowerCase())) || null;
-}
 
 /* ------------------------------------------------------------------ *
  * Login                                                              *
@@ -340,7 +310,7 @@ const Field = ({ label, value, mono = false, tone = "" }) => (
 );
 
 
-function ActivityModal({ task, onClose }) {
+function ActivityModal({ task, network, onClose }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -348,6 +318,7 @@ function ActivityModal({ task, onClose }) {
   }, [onClose]);
 
   if (!task) return null;
+  const overlay = occupancyOverlay([task]);
 
   return (
     <div className="fixed inset-0 z-40 bg-slate-950/80 backdrop-blur-sm flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto">
@@ -413,9 +384,12 @@ function ActivityModal({ task, onClose }) {
             </div>
             {task.buffer_zone?.length > 0 && (
               <p className="mt-1.5 text-[10px] text-slate-500">
-                Exclusion ring: {task.buffer_zone.length} location{task.buffer_zone.length === 1 ? "" : "s"} closed around this possession.
+                Exclusion ring: {overlay.buffer.size} location{overlay.buffer.size === 1 ? "" : "s"} closed around this possession.
               </p>
             )}
+            <div className="mt-3 rounded-lg bg-slate-950/40 ring-1 ring-slate-800 p-3">
+              <TrackMap network={network} occupied={overlay.occupied} buffer={overlay.buffer} caption={`Week ${task.week} · ${task.location_id}`} />
+            </div>
           </section>
 
           {/* 08_ACTIVITY_DETAILS */}
@@ -468,181 +442,6 @@ function ActivityModal({ task, onClose }) {
 }
 
 /* ------------------------------------------------------------------ *
- * Reschedule modal — dropzone + validator + scenario                 *
- * ------------------------------------------------------------------ */
-
-function RescheduleModal({ schemas, onClose, onRun, running }) {
-  const schemaNames = useMemo(() => Object.keys(schemas), [schemas]);
-  const [entries, setEntries] = useState({});   // schemaName -> {file, ok, message, rowCount}
-  const [rejected, setRejected] = useState([]); // files that matched nothing
-  const [scenario, setScenario] = useState(null);
-  const [dragging, setDragging] = useState(false);
-  const inputRef = useRef(null);
-
-  const ingest = useCallback(
-    async (fileList) => {
-      const files = Array.from(fileList || []);
-      const nextRejected = [];
-      const updates = {};
-
-      for (const file of files) {
-        const name = matchSchemaName(file.name, schemaNames);
-        if (!name) {
-          nextRejected.push(`${file.name} is not one of the 8 expected instance files.`);
-          continue;
-        }
-        try {
-          const { headers, rowCount } = await readHeaderRow(file);
-          const required = schemas[name];
-          const missing = required.filter((h) => !headers.includes(h));
-          updates[name] = missing.length
-            ? {
-                file,
-                ok: false,
-                rowCount,
-                message: `${name} is of wrong format. Missing column(s): ${missing.join(", ")}. Required headers: ${required.join(", ")}`,
-              }
-            : { file, ok: true, rowCount, message: `${headers.length} columns · ${rowCount} rows` };
-        } catch {
-          updates[name] = { file, ok: false, rowCount: 0, message: `${name} could not be read.` };
-        }
-      }
-
-      setEntries((prev) => ({ ...prev, ...updates }));
-      setRejected(nextRejected);
-    },
-    [schemaNames, schemas]
-  );
-
-  const present = schemaNames.filter((n) => entries[n]);
-  const valid = schemaNames.filter((n) => entries[n]?.ok);
-  const allValid = valid.length === schemaNames.length;
-  const canRun = allValid && !!scenario && !running;
-
-  return (
-    <div className="fixed inset-0 z-40 bg-slate-950/80 backdrop-blur-sm flex items-start sm:items-center justify-center p-3 sm:p-6 overflow-y-auto">
-      <div className="w-full max-w-2xl rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-2xl my-auto">
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-800">
-          <div className="h-9 w-9 rounded-lg bg-emerald-500/15 ring-1 ring-emerald-400/30 grid place-items-center">
-            <RefreshCw className="h-4 w-4 text-emerald-300" />
-          </div>
-          <div className="flex-1">
-            <h2 className="text-base font-semibold text-slate-100">Run a reschedule</h2>
-            <p className="text-xs text-slate-400">Upload the 8 instance CSVs, pick a scenario, and re-solve.</p>
-          </div>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="px-5 py-4 space-y-5 max-h-[72vh] overflow-y-auto">
-          {/* 1. dropzone */}
-          <section>
-            <h3 className="text-[11px] uppercase tracking-wider text-slate-400 mb-2">1 · Instance files</h3>
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={(e) => { e.preventDefault(); setDragging(false); ingest(e.dataTransfer.files); }}
-              onClick={() => inputRef.current?.click()}
-              className={`cursor-pointer rounded-xl border-2 border-dashed px-4 py-7 text-center transition-colors ${
-                dragging ? "border-sky-400 bg-sky-500/5" : "border-slate-700 hover:border-slate-600 bg-slate-950/40"
-              }`}
-            >
-              <Upload className="h-6 w-6 mx-auto text-slate-500" />
-              <p className="mt-2 text-sm text-slate-300">Drop all 8 CSVs here, or click to browse</p>
-              <p className="text-[11px] text-slate-500 mt-0.5">01_LINES.csv … 08_ACTIVITY_DETAILS.csv</p>
-              <input
-                ref={inputRef}
-                type="file"
-                multiple
-                accept=".csv,text/csv"
-                className="hidden"
-                onChange={(e) => { ingest(e.target.files); e.target.value = ""; }}
-              />
-            </div>
-
-            <div className="mt-3 space-y-1">
-              {schemaNames.map((name) => {
-                const entry = entries[name];
-                return (
-                  <div
-                    key={name}
-                    className={`rounded-lg px-3 py-2 ring-1 text-xs flex items-start gap-2 ${
-                      !entry ? "bg-slate-950/40 ring-slate-800 text-slate-500"
-                      : entry.ok ? "bg-emerald-500/5 ring-emerald-500/25 text-emerald-200"
-                      : "bg-rose-500/5 ring-rose-500/25 text-rose-200"
-                    }`}
-                  >
-                    {!entry ? <FileSpreadsheet className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                      : entry.ok ? <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                      : <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />}
-                    <div className="min-w-0">
-                      <div className="font-mono">{name}</div>
-                      <div className="opacity-80 break-words">{entry ? entry.message : "Awaiting upload"}</div>
-                    </div>
-                  </div>
-                );
-              })}
-              {rejected.map((r) => (
-                <div key={r} className="rounded-lg px-3 py-2 ring-1 ring-amber-500/25 bg-amber-500/5 text-amber-200 text-xs flex gap-2">
-                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" /> {r}
-                </div>
-              ))}
-            </div>
-
-            <p className="mt-2 text-[11px] text-slate-500">
-              {valid.length} of {schemaNames.length} files valid{present.length !== valid.length ? ` · ${present.length - valid.length} rejected` : ""}
-            </p>
-          </section>
-
-          {/* 2. scenario */}
-          <section>
-            <h3 className="text-[11px] uppercase tracking-wider text-slate-400 mb-2">2 · Scenario</h3>
-            <div className="grid gap-2">
-              {SCENARIOS.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => setScenario(s.id)}
-                  className={`text-left rounded-xl px-4 py-3 ring-1 transition-colors ${
-                    scenario === s.id
-                      ? "bg-sky-500/10 ring-sky-500/50"
-                      : "bg-slate-950/40 ring-slate-800 hover:ring-slate-700"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`h-5 w-5 rounded-md grid place-items-center text-[11px] font-semibold ${
-                      scenario === s.id ? "bg-sky-500 text-slate-950" : "bg-slate-800 text-slate-300"
-                    }`}>{s.id}</span>
-                    <span className="text-sm text-slate-100">{s.label}</span>
-                  </div>
-                  <p className="mt-1 text-[11px] text-slate-400 pl-7">{s.hint}</p>
-                </button>
-              ))}
-            </div>
-          </section>
-        </div>
-
-        <div className="px-5 py-4 border-t border-slate-800 flex items-center gap-3">
-          <p className="text-[11px] text-slate-500 flex-1">
-            {canRun ? "Ready to solve." : "Upload all 8 valid files and choose a scenario to enable."}
-          </p>
-          <button onClick={onClose} className="text-sm text-slate-400 hover:text-slate-200 px-3 py-2">Cancel</button>
-          <button
-            disabled={!canRun}
-            onClick={() => onRun(Object.fromEntries(schemaNames.map((n) => [n, entries[n].file])), scenario)}
-            className={`rounded-lg px-4 py-2 text-sm font-medium flex items-center gap-2 transition-colors ${
-              canRun ? "bg-emerald-500 hover:bg-emerald-400 text-slate-950" : "bg-slate-800 text-slate-500 cursor-not-allowed"
-            }`}
-          >
-            <RefreshCw className={`h-4 w-4 ${running ? "animate-spin" : ""}`} /> Run Reschedule
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ *
  * Dashboard shell                                                    *
  * ------------------------------------------------------------------ */
 
@@ -655,9 +454,9 @@ export default function App() {
   const [loadingLabel, setLoadingLabel] = useState("Loading schedule…");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
-  const [showReschedule, setShowReschedule] = useState(false);
+  const [page, setPage] = useState("dashboard"); // "dashboard" | "editor"
+  const [editorDraft, setEditorDraft] = useState(null); // uploads + scenario kept across editor visits
   const [activeWeek, setActiveWeek] = useState(null);
-  const [uploadedFiles, setUploadedFiles] = useState(null);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [view, setView] = useState("list");
   const [month, setMonth] = useState("");
@@ -684,23 +483,29 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  const loadBaseline = useCallback(async (scenario = "A") => {
+  /** Make `body` the schedule the dashboard renders and reset every view-level selection. */
+  const adoptSchedule = useCallback((body) => {
+    weekRefs.current = {};
+    setData(body);
+    setFilters(EMPTY_FILTERS);
+    setMonth(body.tasks?.[0]?.date.slice(0, 7) || body.horizon.start.slice(0, 7));
+    setScheduleModal(null);
+    setDay(null);
+    setSelected(null);
+    setActiveWeek(null);
+    scrollerRef.current?.scrollTo({ top: 0 });
+  }, []);
+
+  /** The active (implemented) schedule if one exists on the server, else the bundled Scenario A baseline. */
+  const loadSchedule = useCallback(async () => {
     setLoading(true);
-    setLoadingLabel("Solving reference schedule…");
+    setLoadingLabel("Loading...");
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/schedule?scenario=${scenario}`);
+      let res = await fetch(`${API_BASE}/api/schedule/active`);
+      if (res.status === 204) res = await fetch(`${API_BASE}/api/schedule?scenario=A`);
       if (!res.ok) throw new Error(`API returned ${res.status}`);
-      const body = await res.json();
-      weekRefs.current = {};
-      setData(body);
-      setFilters(EMPTY_FILTERS);
-      setMonth(body.tasks?.[0]?.date.slice(0, 7) || body.horizon.start.slice(0, 7));
-      setScheduleModal(null);
-      setDay(null);
-      setUploadedFiles(null);
-      setActiveWeek(null);
-      scrollerRef.current?.scrollTo({ top: 0 });
+      adoptSchedule(await res.json());
       setApiOnline(true);
     } catch (e) {
       setError(
@@ -710,43 +515,26 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [adoptSchedule]);
 
-  useEffect(() => { if (user) loadBaseline("A"); }, [user, loadBaseline]);
+  useEffect(() => { if (user) loadSchedule(); }, [user, loadSchedule]);
 
-  /* ---- reschedule ---- */
-  const runReschedule = useCallback(async (files, scenario) => {
-    setLoading(true);
-    setLoadingLabel(`Re-solving Scenario ${scenario}…`);
-    setError("");
-    try {
-      const form = new FormData();
-      form.append("scenario", scenario);
-      Object.entries(files).forEach(([name, file]) => form.append("files", file, name));
-
-      const res = await fetch(`${API_BASE}/api/reschedule`, { method: "POST", body: form });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const detail = body?.detail;
-        throw new Error(typeof detail === "string" ? detail : detail?.message || `Reschedule failed (${res.status})`);
-      }
-      weekRefs.current = {};
-      setData(body);
-      setFilters(EMPTY_FILTERS);
-      setMonth(body.tasks?.[0]?.date.slice(0, 7) || body.horizon.start.slice(0, 7));
-      setScheduleModal(null);
-      setDay(null);
-      setUploadedFiles(files);
-      setActiveWeek(null);
-      scrollerRef.current?.scrollTo({ top: 0 });
-      setSelected(null);
-      setShowReschedule(false);
-    } catch (e) {
-      setError(e.message || "Reschedule failed.");
-    } finally {
-      setLoading(false);
+  /* ---- editor: promote a previewed run to the active schedule and return to the dashboard ---- */
+  const implementSchedule = useCallback(async (preview) => {
+    const res = await fetch(`${API_BASE}/api/schedule/activate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: preview.run_id }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = body?.detail;
+      throw new Error(typeof detail === "string" ? detail : detail?.message || `Could not activate schedule (${res.status})`);
     }
-  }, []);
+    adoptSchedule(body);
+    setError("");
+    setPage("dashboard");
+  }, [adoptSchedule]);
 
   /* ---- RBAC filtering ---- */
   const tasks = useMemo(() => {
@@ -755,21 +543,6 @@ export default function App() {
     const rows = scope ? data.tasks.filter((t) => scope.includes(t.contract_number)) : data.tasks;
     return [...rows].sort((a, b) => a.week - b.week || a.date.localeCompare(b.date) || a.activity_id.localeCompare(b.activity_id));
   }, [data, user]);
-
-  const stats = useMemo(() => {
-    const activities = new Set(tasks.map((t) => t.activity_id));
-    const contracts = new Set(tasks.map((t) => t.contract_number));
-    const delayedAccesses = tasks.filter((t) => t.days_delayed > 0);
-    const delayedActivities = new Set(delayedAccesses.map((t) => t.activity_id));
-    return {
-      accessNights: tasks.length,
-      activities: activities.size,
-      contracts: contracts.size,
-      delayed: delayedAccesses.length,
-      delayedActivities: delayedActivities.size,
-      eclo: tasks.filter((t) => t.eclo === 1).length,
-    };
-  }, [tasks]);
 
   const visibleTasks = useMemo(
     () => tasks.filter((task) => matches(task, filters.query, filters.priority, filters.location)),
@@ -789,14 +562,14 @@ export default function App() {
   useEffect(() => {
     const onKey = (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k"
-          && user && data && !loading && !selected && !showReschedule && !day && !scheduleModal) {
+          && user && data && !loading && !selected && page === "dashboard" && !day && !scheduleModal) {
         event.preventDefault();
         setScheduleModal("search");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [user, data, loading, selected, showReschedule, day, scheduleModal]);
+  }, [user, data, loading, selected, page, day, scheduleModal]);
 
   const jumpToWeek = useCallback((week) => {
     setActiveWeek(week);
@@ -852,7 +625,7 @@ export default function App() {
               onClick={() => {
                 setUser(null); setData(null); setSelected(null); setScheduleModal(null);
                 setDay(null); setFilters(EMPTY_FILTERS); setView("list"); setActiveWeek(null);
-                setUploadedFiles(null); setShowReschedule(false); setMapDraft(null);
+                setEditorDraft(null); setPage("dashboard"); setMapDraft(null);
               }}
               className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-400 hover:text-slate-100 hover:bg-slate-800 ring-1 ring-slate-800"
             >
@@ -885,45 +658,9 @@ export default function App() {
           <div className="rounded-xl bg-rose-500/10 ring-1 ring-rose-500/30 px-4 py-3 text-sm text-rose-200 flex items-start gap-2">
             <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
             <div className="flex-1">{error}</div>
-            <button onClick={() => loadBaseline("A")} className="text-xs underline hover:no-underline">Retry</button>
+            <button onClick={loadSchedule} className="text-xs underline hover:no-underline">Retry</button>
           </div>
         )}
-
-        {isAdmin && (
-          <div className="flex flex-wrap items-center gap-2" aria-label="Scenario selection">
-            {SCENARIOS.map((scenario) => (
-              <button key={scenario.id} disabled={loading} aria-pressed={data?.scenario === scenario.id}
-                onClick={() => uploadedFiles ? runReschedule(uploadedFiles, scenario.id) : loadBaseline(scenario.id)}
-                title={scenario.hint}
-                className={`rounded-lg px-3 py-2 text-xs ring-1 ${data?.scenario === scenario.id ? "bg-sky-500/15 text-sky-300 ring-sky-500" : "text-slate-400 ring-slate-700 hover:text-slate-100"}`}>
-                {scenario.name}
-              </button>
-            ))}
-            <span className="text-xs text-slate-500">{uploadedFiles ? "Using your 8 uploaded CSVs" : "Using bundled reference CSVs"}</span>
-          </div>
-        )}
-
-        {/* summary tiles */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-          <Metric icon={Moon} label="Access nights" value={stats.accessNights} />
-          <Metric icon={ClipboardList} label="Activities" value={stats.activities} />
-          <Metric icon={Layers} label="Contracts" value={stats.contracts} />
-          <Metric
-            icon={Gauge}
-            label="Overrunning accesses"
-            value={stats.delayed}
-            description={`Across ${stats.delayedActivities} ${stats.delayedActivities === 1 ? "activity" : "activities"}`}
-            title="Counts every access card belonging to an activity that finishes after its planned completion date, including accesses before that date."
-            tone={stats.delayed ? "text-rose-300" : "text-emerald-300"}
-          />
-          <Metric icon={Moon} label="ECLO nights" value={stats.eclo} tone={stats.eclo ? "text-amber-300" : ""} />
-          <Metric
-            icon={Gauge}
-            label="Objective"
-            value={data?.soft_scores?.objective_score ?? "—"}
-            tone={data?.feasible ? "text-emerald-300" : "text-slate-400"}
-          />
-        </div>
 
         {/* violations */}
         {data && !data.feasible && (
@@ -949,19 +686,6 @@ export default function App() {
               {visibleTasks.length} of {tasks.length} access nights
               {user.contracts ? ` · scoped to ${user.contracts.join(", ")}` : " · all contracts"}
             </span>
-            {isAdmin && data && (
-              <div className="ml-auto flex flex-wrap items-center gap-2">
-                {["SCHEDULE_ACCESS.csv", "SCHEDULE_OCCUPANCY.csv", "RESULTS.csv"].map((f) => (
-                  <a
-                    key={f}
-                    href={`${API_BASE}/api/download/${data.scenario}/${f}?run_id=${data.run_id}`}
-                    className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-sky-300 ring-1 ring-slate-800 rounded-lg px-2 py-1"
-                  >
-                    <Download className="h-3 w-3" /> {f.replace(".csv", "")}
-                  </a>
-                ))}
-              </div>
-            )}
           </div>
 
           <ScheduleToolbar tasks={tasks} filters={filters} onApply={applyFilters}
@@ -996,7 +720,7 @@ export default function App() {
       {/* ---------- admin floating action ---------- */}
       {isAdmin && (
         <button
-          onClick={() => setShowReschedule(true)}
+          onClick={() => setPage("editor")}
           className="fixed bottom-6 right-6 z-30 inline-flex items-center gap-2 rounded-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-medium text-sm pl-4 pr-5 py-3 shadow-lg shadow-emerald-500/20 transition-colors"
         >
           <RefreshCw className="h-4 w-4" /> Reschedule
@@ -1006,10 +730,11 @@ export default function App() {
       {scheduleModal === "search" && <SearchDialog tasks={tasks} {...filters}
         onApply={applyFilters} onClose={() => setScheduleModal(null)}
         onMap={(draft) => { setMapDraft(draft); setScheduleModal("map"); }} />}
-      {scheduleModal === "map" && <LocationMap network={data?.network} tasks={tasks}
+      {scheduleModal === "map" && <LocationMap network={data?.network} tasks={tasks} week={activeWeek}
         location={mapDraft?.location ?? filters.location} onClose={() => setScheduleModal(null)}
         onSelect={(location) => { applyFilters({ ...(mapDraft || filters), location }); setMapDraft(null); }} />}
-      {scheduleModal === "kda" && data && <KdaDialog data={data} onClose={() => setScheduleModal(null)} />}
+      {scheduleModal === "kda" && data && <KdaDialog data={data} onClose={() => setScheduleModal(null)}
+        downloads={isAdmin ? OUTPUT_FILES.map((name) => ({ name, href: `${API_BASE}/api/download/${data.scenario}/${name}?run_id=${data.run_id}` })) : []} />}
       {day && <Dialog title={`Possessions · ${fmtDate(day.date)}`}
         subtitle={`${day.tasks.length} access nights · week-start date`} icon={CalendarDays} onClose={() => setDay(null)}>
         <div className="p-4 space-y-3">{day.tasks.map((task) => (
@@ -1017,13 +742,15 @@ export default function App() {
             onOpen={(row) => { setDay(null); setSelected(row); }} />
         ))}</div>
       </Dialog>}
-      {selected && <ActivityModal task={selected} onClose={() => setSelected(null)} />}
-      {showReschedule && (
-        <RescheduleModal
+      {selected && <ActivityModal task={selected} network={data?.network} onClose={() => setSelected(null)} />}
+      {page === "editor" && isAdmin && (
+        <EditorView
           schemas={schemas}
-          running={loading}
-          onClose={() => setShowReschedule(false)}
-          onRun={runReschedule}
+          apiBase={API_BASE}
+          draft={editorDraft}
+          onDraftChange={setEditorDraft}
+          onBack={() => setPage("dashboard")}
+          onImplement={implementSchedule}
         />
       )}
 
