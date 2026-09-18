@@ -175,6 +175,10 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
         "soft_scores": out.soft_scores.model_dump(),
         "detail": out.detail,
         "tasks": tasks,
+        "network": {
+            "lines": [line.model_dump() for line in data.lines],
+            "stations": [station.model_dump() for station in data.stations],
+        },
         "results": [r.model_dump() for r in out.results],
         "contracts": [
             {

@@ -24,6 +24,10 @@ import {
   XCircle,
 } from "lucide-react";
 
+import Metric from "./Metric.jsx";
+import { Dialog, KdaDialog, LocationMap, MonthlyView, ScheduleToolbar, SearchDialog } from "./ScheduleControls.jsx";
+import { activityPriority, EMPTY_FILTERS, matches } from "./schedule-utils.js";
+
 /* ------------------------------------------------------------------ *
  * Configuration                                                      *
  * ------------------------------------------------------------------ */
@@ -47,7 +51,7 @@ const USERS = {
   },
 };
 
-export const SCENARIOS = [
+const SCENARIOS = [
   { id: "A", name: "Scenario A", label: "Strict Supply, Flexible Schedule", hint: "Capacity is rigid. ECLO forbidden. Minimise priority-weighted overrun." },
   { id: "B", name: "Scenario B", label: "Strict Schedule, Flexible Supply", hint: "Planned dates are rigid. Pay with extra access-nights and ECLO." },
   { id: "C", name: "Scenario C", label: "Elastic Supply, Flexible Schedule", hint: "Both flex. +1 excess access-night per location-week allowed." },
@@ -210,7 +214,7 @@ function Login({ onLogin, apiOnline }) {
  * Sticky timeline strip                                              *
  * ------------------------------------------------------------------ */
 
-export function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
+function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
   const buckets = useMemo(() => {
     const weeks = new Map();
     let max = horizon?.weeks ?? 30;
@@ -262,7 +266,7 @@ export function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
  * Task card — minimalist 3-column                                    *
  * ------------------------------------------------------------------ */
 
-export function TaskCard({ task, onOpen, registerRef }) {
+function TaskCard({ task, onOpen, registerRef }) {
   return (
     <button
       ref={(el) => registerRef(task.week, el)}
@@ -298,7 +302,10 @@ export function TaskCard({ task, onOpen, registerRef }) {
 
       <div className="mt-2.5 flex items-center gap-1.5 text-[10px]">
         <span className={`rounded px-1.5 py-0.5 ring-1 ${priorityTone(task.contract_priority)}`}>
-          P{task.contract_priority}
+          Contract P{task.contract_priority}
+        </span>
+        <span className={`rounded px-1.5 py-0.5 ring-1 ${activityPriority(task).tone}`}>
+          Activity P{task.activity_priority}
         </span>
         <span className="rounded px-1.5 py-0.5 bg-slate-800 text-slate-300">{task.access_type}</span>
         {task.eclo === 1 && (
@@ -332,17 +339,8 @@ const Field = ({ label, value, mono = false, tone = "" }) => (
   </div>
 );
 
-export const Metric = ({ icon: Icon, label, value, tone, description, title }) => (
-  <div title={title} className="rounded-lg bg-slate-950/60 ring-1 ring-slate-800 px-3 py-2.5">
-    <div className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-      <Icon className="h-3 w-3" /> {label}
-    </div>
-    <div className={`mt-0.5 text-lg font-semibold tabular-nums ${tone || "text-slate-100"}`}>{value}</div>
-    {description && <div className="mt-0.5 text-[10px] text-slate-400">{description}</div>}
-  </div>
-);
 
-export function ActivityModal({ task, onClose }) {
+function ActivityModal({ task, onClose }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -660,12 +658,15 @@ export default function App() {
   const [showReschedule, setShowReschedule] = useState(false);
   const [activeWeek, setActiveWeek] = useState(null);
   const [uploadedFiles, setUploadedFiles] = useState(null);
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [view, setView] = useState("list");
+  const [month, setMonth] = useState("");
+  const [scheduleModal, setScheduleModal] = useState(null);
+  const [mapDraft, setMapDraft] = useState(null);
+  const [day, setDay] = useState(null);
 
   const weekRefs = useRef({});
   const scrollerRef = useRef(null);
-  const registerRef = useCallback((week, el) => {
-    if (el && !weekRefs.current[week]) weekRefs.current[week] = el;
-  }, []);
 
   /* ---- boot ---- */
   useEffect(() => {
@@ -693,6 +694,10 @@ export default function App() {
       const body = await res.json();
       weekRefs.current = {};
       setData(body);
+      setFilters(EMPTY_FILTERS);
+      setMonth(body.tasks?.[0]?.date.slice(0, 7) || body.horizon.start.slice(0, 7));
+      setScheduleModal(null);
+      setDay(null);
       setUploadedFiles(null);
       setActiveWeek(null);
       scrollerRef.current?.scrollTo({ top: 0 });
@@ -727,6 +732,10 @@ export default function App() {
       }
       weekRefs.current = {};
       setData(body);
+      setFilters(EMPTY_FILTERS);
+      setMonth(body.tasks?.[0]?.date.slice(0, 7) || body.horizon.start.slice(0, 7));
+      setScheduleModal(null);
+      setDay(null);
       setUploadedFiles(files);
       setActiveWeek(null);
       scrollerRef.current?.scrollTo({ top: 0 });
@@ -762,22 +771,51 @@ export default function App() {
     };
   }, [tasks]);
 
+  const visibleTasks = useMemo(
+    () => tasks.filter((task) => matches(task, filters.query, filters.priority, filters.location)),
+    [tasks, filters],
+  );
+
+  const applyFilters = (next) => {
+    setFilters(next);
+    setScheduleModal(null);
+    setActiveWeek(null);
+    weekRefs.current = {};
+    const first = tasks.find((task) => matches(task, next.query, next.priority, next.location));
+    if (first) setMonth(first.date.slice(0, 7));
+    scrollerRef.current?.scrollTo({ top: 0 });
+  };
+
+  useEffect(() => {
+    const onKey = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k"
+          && user && data && !loading && !selected && !showReschedule && !day && !scheduleModal) {
+        event.preventDefault();
+        setScheduleModal("search");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [user, data, loading, selected, showReschedule, day, scheduleModal]);
+
   const jumpToWeek = useCallback((week) => {
     setActiveWeek(week);
+    const task = visibleTasks.find((row) => row.week === week);
+    if (task) setMonth(task.date.slice(0, 7));
     const el = weekRefs.current[week];
     if (el && scrollerRef.current) {
       const container = scrollerRef.current;
       const top = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 8;
       container.scrollTo({ top, behavior: "smooth" });
     }
-  }, []);
+  }, [visibleTasks]);
 
   if (!user) return <Login onLogin={setUser} apiOnline={apiOnline} />;
 
   const isAdmin = user.role === "admin";
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-slate-950 text-slate-100 pb-20">
       {/* ---------- header ---------- */}
       <header className="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-800">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 py-3 flex items-center gap-3">
@@ -811,7 +849,11 @@ export default function App() {
               {user.username} · {isAdmin ? "Admin" : "Engineer"}
             </span>
             <button
-              onClick={() => { setUser(null); setData(null); setSelected(null); }}
+              onClick={() => {
+                setUser(null); setData(null); setSelected(null); setScheduleModal(null);
+                setDay(null); setFilters(EMPTY_FILTERS); setView("list"); setActiveWeek(null);
+                setUploadedFiles(null); setShowReschedule(false); setMapDraft(null);
+              }}
               className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-400 hover:text-slate-100 hover:bg-slate-800 ring-1 ring-slate-800"
             >
               <LogOut className="h-3 w-3" /> Logout
@@ -832,7 +874,7 @@ export default function App() {
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-rose-400/80" /> overrun</span>
               </div>
             </div>
-            <TimelineStrip tasks={tasks} horizon={data?.horizon} activeWeek={activeWeek} onPickWeek={jumpToWeek} />
+            <TimelineStrip tasks={visibleTasks} horizon={data?.horizon} activeWeek={activeWeek} onPickWeek={jumpToWeek} />
           </div>
         </div>
       </header>
@@ -904,7 +946,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2 mb-2">
             <h2 className="text-sm font-medium text-slate-200">Scheduled possessions</h2>
             <span className="text-[11px] text-slate-500">
-              {tasks.length} access-night{tasks.length === 1 ? "" : "s"}
+              {visibleTasks.length} of {tasks.length} access nights
               {user.contracts ? ` · scoped to ${user.contracts.join(", ")}` : " · all contracts"}
             </span>
             {isAdmin && data && (
@@ -922,17 +964,32 @@ export default function App() {
             )}
           </div>
 
-          {tasks.length === 0 && !loading ? (
+          <ScheduleToolbar tasks={tasks} filters={filters} onApply={applyFilters}
+            view={view} onView={setView} disabled={!data || loading}
+            onSearch={() => setScheduleModal("search")}
+            onKda={() => setScheduleModal("kda")}
+            onMap={() => { setMapDraft(null); setScheduleModal("map"); }} />
+
+          {visibleTasks.length === 0 && !loading ? (
             <div className="rounded-xl ring-1 ring-slate-800 bg-slate-900/40 px-4 py-10 text-center text-sm text-slate-500">
-              No scheduled possessions in scope.
+              {tasks.length ? "No possessions match these filters." : "No scheduled possessions in scope."}
+              {Object.values(filters).some(Boolean) && <button onClick={() => applyFilters(EMPTY_FILTERS)} className="block mx-auto mt-3 text-xs text-sky-300">Clear filters and show all</button>}
             </div>
+          ) : view === "month" && month ? (
+            <MonthlyView tasks={visibleTasks} month={month} setMonth={setMonth} onOpenDay={setDay} onOpen={setSelected} />
           ) : (
             <div ref={scrollerRef} role="region" aria-label="Scheduled possessions" tabIndex={0} className="relative max-h-[60vh] overflow-y-auto overflow-x-hidden flex flex-col gap-3 p-2 scrollbar-thin">
-              {tasks.map((t) => (
-                <TaskCard key={t.key} task={t} onOpen={setSelected} registerRef={registerRef} />
+              {visibleTasks.map((task, index) => (
+                <TaskCard key={task.key} task={task} onOpen={setSelected} registerRef={(week, element) => {
+                  if (index === 0 || visibleTasks[index - 1].week !== week) {
+                    if (element) weekRefs.current[week] = element;
+                    else delete weekRefs.current[week];
+                  }
+                }} />
               ))}
             </div>
           )}
+
         </section>
       </main>
 
@@ -946,6 +1003,20 @@ export default function App() {
         </button>
       )}
 
+      {scheduleModal === "search" && <SearchDialog tasks={tasks} {...filters}
+        onApply={applyFilters} onClose={() => setScheduleModal(null)}
+        onMap={(draft) => { setMapDraft(draft); setScheduleModal("map"); }} />}
+      {scheduleModal === "map" && <LocationMap network={data?.network} tasks={tasks}
+        location={mapDraft?.location ?? filters.location} onClose={() => setScheduleModal(null)}
+        onSelect={(location) => { applyFilters({ ...(mapDraft || filters), location }); setMapDraft(null); }} />}
+      {scheduleModal === "kda" && data && <KdaDialog data={data} onClose={() => setScheduleModal(null)} />}
+      {day && <Dialog title={`Possessions · ${fmtDate(day.date)}`}
+        subtitle={`${day.tasks.length} access nights · week-start date`} icon={CalendarDays} onClose={() => setDay(null)}>
+        <div className="p-4 space-y-3">{day.tasks.map((task) => (
+          <TaskCard key={task.key} task={task} registerRef={() => {}}
+            onOpen={(row) => { setDay(null); setSelected(row); }} />
+        ))}</div>
+      </Dialog>}
       {selected && <ActivityModal task={selected} onClose={() => setSelected(null)} />}
       {showReschedule && (
         <RescheduleModal

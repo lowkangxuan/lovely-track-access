@@ -171,6 +171,7 @@ class InputAndApiTests(unittest.TestCase):
     def test_upload_all_scenarios_and_snapshot_downloads(self):
         # A changed CSV identifier proves the uploaded instance, rather than the bundled data, is solved.
         self.files["08_ACTIVITY_DETAILS.csv"] = self.files["08_ACTIVITY_DETAILS.csv"].replace("A001", "UPLOADED_ACTIVITY")
+        self.files["01_LINES.csv"] = self.files["01_LINES.csv"].replace("Line Alpha", "Uploaded Alpha")
         uploads = [("files", (name, raw, "text/csv")) for name, raw in self.files.items()]
         for scenario in "ABC":
             response = self.client.post("/api/reschedule", data={"scenario": scenario}, files=uploads)
@@ -178,6 +179,10 @@ class InputAndApiTests(unittest.TestCase):
             body = response.json()
             self.assertTrue(body["feasible"], body["hard_violations"])
             self.assertIn("UPLOADED_ACTIVITY", {t["activity_id"] for t in body["tasks"]})
+            self.assertIn("Uploaded Alpha", {line["line_name"] for line in body["network"]["lines"]})
+            stations = body["network"]["stations"]
+            self.assertTrue(any(station["station_id"] == "H01" and station["is_interchange"] == 1 for station in stations))
+            self.assertTrue(all("seq" in station and "line_code" in station for station in stations))
             old_id = body["run_id"]
             self.client.get(f"/api/schedule?scenario={scenario}")
             for filename, headers in OUTPUT_HEADERS.items():

@@ -187,13 +187,22 @@ per-contract accounting index, independent of location). Consequences:
 
 ## Frontend structure
 
-`src/App.jsx` is self-contained:
+`src/App.jsx` provides the dashboard shell and live API integration:
 
 * `Login` — hardcoded credentials, RBAC scope attached to the session
 * `TimelineStrip` — sticky chronological week histogram; click a week to scroll
   the card rail to it. Bars colour by on-target / ECLO / overrun.
 * `TaskCard` — minimalist 3-column card: `contract:activity` · `location_id` ·
   `date / week`, in a horizontally scrollable rail sorted earliest → latest
+* `ScheduleControls` — project-code search, activity-priority and occupied-location
+  filters, a live network station picker, and list/month views. Filters apply after
+  the user's contract scope. Calendar colours use **activity priority**: P1 (highest)
+  rose, P2 amber, P3 (lowest) sky blue, with text labels and a legend. ECLO and
+  overrun appear as additional labels. Calendar dates are week starts, matching
+  the scheduler's date model; overflow opens all possessions for that date.
+* `KdaDialog` — the current full schedule's scenario rubric, including feasibility,
+  weighted overrun, excess nights, ECLO and objective contributions. Filters do not
+  change the full-schedule KDA. Uploaded schedules and scenario changes refresh it.
 * `ActivityModal` — schedule metrics (scheduled date/week, access nights, days
   delayed vs `planned_completion_date`), possession occupancy with slot labels,
   then the full `08_ACTIVITY_DETAILS` and `07_PROJECT_DETAILS` context
@@ -204,3 +213,5 @@ per-contract accounting index, independent of location). Consequences:
 
 Point the UI at a different backend with `VITE_API_BASE` (see
 `frontend/.env.example`).
+
+Frontend checks: `cd frontend && npm test && npm run build`.
