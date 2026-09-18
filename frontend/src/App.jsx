@@ -47,7 +47,7 @@ const USERS = {
   },
 };
 
-const SCENARIOS = [
+export const SCENARIOS = [
   { id: "A", name: "Scenario A", label: "Strict Supply, Flexible Schedule", hint: "Capacity is rigid. ECLO forbidden. Minimise priority-weighted overrun." },
   { id: "B", name: "Scenario B", label: "Strict Schedule, Flexible Supply", hint: "Planned dates are rigid. Pay with extra access-nights and ECLO." },
   { id: "C", name: "Scenario C", label: "Elastic Supply, Flexible Schedule", hint: "Both flex. +1 excess access-night per location-week allowed." },
@@ -210,7 +210,7 @@ function Login({ onLogin, apiOnline }) {
  * Sticky timeline strip                                              *
  * ------------------------------------------------------------------ */
 
-function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
+export function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
   const buckets = useMemo(() => {
     const weeks = new Map();
     let max = horizon?.weeks ?? 30;
@@ -262,7 +262,7 @@ function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
  * Task card — minimalist 3-column                                    *
  * ------------------------------------------------------------------ */
 
-function TaskCard({ task, onOpen, registerRef }) {
+export function TaskCard({ task, onOpen, registerRef }) {
   return (
     <button
       ref={(el) => registerRef(task.week, el)}
@@ -332,7 +332,7 @@ const Field = ({ label, value, mono = false, tone = "" }) => (
   </div>
 );
 
-const Metric = ({ icon: Icon, label, value, tone, description, title }) => (
+export const Metric = ({ icon: Icon, label, value, tone, description, title }) => (
   <div title={title} className="rounded-lg bg-slate-950/60 ring-1 ring-slate-800 px-3 py-2.5">
     <div className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
       <Icon className="h-3 w-3" /> {label}
@@ -342,7 +342,7 @@ const Metric = ({ icon: Icon, label, value, tone, description, title }) => (
   </div>
 );
 
-function ActivityModal({ task, onClose }) {
+export function ActivityModal({ task, onClose }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);

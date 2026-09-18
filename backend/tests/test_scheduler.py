@@ -61,6 +61,7 @@ class SolverTests(unittest.TestCase):
 
     def test_co_share_packs_four_coworkers(self):
         data = small(4)
+        data.contracts[0].number_of_workfronts = 4  # rule 8 would otherwise split them over two nights
         out = solve_scenario("A", data)
         self.assertTrue(out.feasible)
         self.assertEqual({r.week for r in out.schedule_access}, {1})

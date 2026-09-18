@@ -82,24 +82,41 @@ keep working. `InstanceData` and `SolveOutput` are Pydantic models in
 
 ```
 solver/
-  schemas.py    Pydantic models + the canonical CSV header registry
-  loader.py     CSV -> InstanceData, with the header validator the UI mirrors
-  network.py    location-id grammar, path expansion, buffer footprints, week maths
-  baseline.py   the default greedy solver  <- replace this
-  scoring.py    soft scores + the §2.5 combined objective
-  registry.py   solve_scenario() dispatch  <- register here
+  schemas.py     Pydantic models + the canonical CSV header registry
+  loader.py      CSV -> InstanceData, header validator + referential checks
+  network.py     location-id grammar, path expansion, buffer footprints, week maths
+  policies.py    the A / B / C rule sets (excess cap, ECLO, deadline, continuity)
+  optimizer.py   CP-SAT solver seeded by a multi-start greedy  <- registered for A, B, C
+  baseline.py    the original greedy solver, still the "*" fallback
+  validation.py  read-only hard-rule checker run on every emitted schedule
+  scoring.py     soft scores + the §2.5 combined objective
+  registry.py    solve_scenario() dispatch  <- register here
 ```
 
 ---
 
-## What the baseline solver does
+## What the solver does
 
-Multi-start greedy: several structurally different dispatch orders (contract
-tier, slack, planned start, criticality), then an adaptive pass that promotes
-whatever overran and re-solves. Deterministic, ~0.2 s per scenario on the
-reference instance.
+Scenarios `A`, `B` and `C` are registered to `solver/optimizer.py`: a
+time-indexed CP-SAT model (OR-Tools) over `(activity, week, possession night)`
+booleans, seeded with the best of several greedy constructions. The greedy
+always finishes the full workload (extending the calendar under congestion), so
+there is always a complete incumbent; CP-SAT then minimises the scenario
+objective within the incumbent's horizon and night palette and reports its
+search status in `detail.search_status`. If CP-SAT cannot improve on the greedy
+seed within the time limit (`SOLVER_TIME_LIMIT_SECONDS`, default 15 s), the
+seed is returned with `detail.fallback_used = true`.
 
-Hard rules enforced:
+The model's objective is the §2.5 formula scaled by 10 (so `objective_bound` is
+reported as `best_objective_bound / 10`): overrun days weighted 100/10/1 by
+contract tier and 1.3/1.2/1.0 by activity tier, 7 per excess access-night, 5
+per ECLO night. `B` drops the overrun term (dates are hard there).
+
+`baseline.py` remains registered as `"*"` and is only used if a scenario is
+deregistered.
+
+Hard rules enforced (and independently re-checked by `validation.py` on every
+emitted schedule):
 
 1. **Workload conservation** — every activity reaches `total_accesses` units
 2. **Planned start date** — no access before the planned start week
@@ -119,33 +136,52 @@ overrun past `planned_completion_date`.
 
 ### Reference-instance results
 
+CP-SAT proves all three optimal within the bounded model, in well under a second
+each.
+
 | scenario | feasible | activities scheduled | overrun days | ECLO | excess nights | objective |
 | -------- | -------- | -------------------- | ------------ | ---- | ------------- | --------- |
-| A | yes | 54 / 54 | 329 | 0 | 0 | 2426.9 |
-| B | **no** — 2 date violations | 54 / 54 | 84 | 104 | 0 | — |
-| C | yes | 54 / 54 | 189 | 7 | 2 | 1237.6 |
+| A | yes | 54 / 54 | 21 (C006 +14, C010 +7) | 0 | 0 | 25.2 |
+| B | yes | 54 / 54 | 0 | 6 | 0 | 30.0 |
+| C | yes | 54 / 54 | 21 (C006 +14, C010 +7) | 0 | 0 | 25.2 |
 
-Scenario B is the honest weak spot of the *baseline*: dates are a hard gate
-there and greedy dispatch cannot close the last two contracts. It is exactly the
-case a real optimiser registered through `registry.py` should fix.
+`C` coincides with `A` on this instance: with the overrun weighted at 1/day for
+tier-3 contracts, neither an ECLO night (5) nor an excess access-night (7) buys
+enough schedule to pay for itself.
 
 ### Documented modelling decisions
 
 The published submission format cannot express which two possessions at
 *different* locations fall on the same night (`access_night` is explicitly a
-per-contract accounting index, independent of location). Two consequences:
+per-contract accounting index, independent of location). Consequences:
 
 * `supply_capacity` at a location-week is read as the number of possession
-  slots (nights) available there that week; `co_share_group` labels the slot.
-  Excess access-nights are slots used beyond that capacity.
-* Buffer conflicts are evaluated at **week** granularity, between one activity's
-  strict exclusion ring (buffer zone minus its own worked path) and another
-  activity's worked path. This is conservative — it can cost packing density,
-  never produce a breach.
-
-The exclusion ring is measured in tunnel sectors, matching
-`05_BUFFER_LOCATION.up_to_buffer_sectors`; platforms enter a footprint only
-where they are actually worked.
+  slots (nights) available there that week. Excess access-nights are slots used
+  beyond that capacity.
+* `co_share_group` (`night-N`) is the **physical night** witness: the label is
+  consistent across every location an activity occupies in a week, and across
+  activities, so `night-1` at two different locations in the same week is the
+  same night. `access_night` is then the rank of that slot among the nights the
+  contract uses that week.
+* **One access per activity per week.** Each activity gets at most one night in
+  any given week; a 5-access activity therefore spans at least 5 weeks. This is
+  inherited from the baseline and is the main driver of overrun — revisit it if
+  the specification permits several nights per week for one activity.
+* Buffer conflicts are evaluated at **night** granularity (same week, same
+  `co_share_group`) between the two activities' full closure footprints
+  (worked path + exclusion ring, on both bounds if mirrored). Two footprints that
+  overlap anywhere — including only at a shared platform between their rings —
+  may not share a night, **unless** the activities work a common location and
+  form a legal possession mix, in which case they co-share one possession. This
+  is stricter than "no work inside another's ring" and can cost packing
+  density; it never produces a breach.
+* A platform-only job books only that platform (not the two adjacent tunnels);
+  its exclusion ring extends `up_to_buffer_sectors` tunnel sectors in each
+  direction. A tunnel job's ring also includes the platforms bounding each
+  buffered sector.
+* An activity's `lines_touched` (used for the Scenario C ECLO window) is
+  derived from its full footprint, so a `Live` job at `H01_H02` consumes the
+  ECLO window on both lines.
 
 ---
 
