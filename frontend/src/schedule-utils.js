@@ -60,10 +60,10 @@ export function networkTracks(network) {
     const index = new Map(ordered.map((s, i) => [s.station_id, i]));
     const own = sectors.filter((s) => s.line_code === line.line_code);
     const edges = own.length
-      ? own.map((s) => ({ sector_id: s.sector_id, from: s.from_station_id, to: s.to_station_id, is_shared: s.is_shared ?? 0 }))
+      ? own.map((s) => ({ sector_id: s.sector_id, from: s.from_station_id, to: s.to_station_id, is_shared: s.is_shared ?? 0, sector_kind: s.sector_kind ?? null }))
       : ordered.slice(1).map((to, i) => ({
           sector_id: `SEC:${line.line_code}:${ordered[i].station_id}_${to.station_id}`,
-          from: ordered[i].station_id, to: to.station_id, is_shared: 0,
+          from: ordered[i].station_id, to: to.station_id, is_shared: 0, sector_kind: null,
         }));
     const placed = edges
       .filter((e) => index.has(e.from) && index.has(e.to))

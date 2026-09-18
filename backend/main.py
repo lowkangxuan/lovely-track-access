@@ -10,16 +10,21 @@ Endpoints
 GET  /api/health          liveness + which solver is registered per scenario
 GET  /api/schemas         the 8 required CSV headers (the UI validates against this)
 GET  /api/schedule        baseline schedule from the bundled reference instance
-POST /api/reschedule      multipart: 8 instance CSVs + `scenario` -> full schedule (a preview)
-POST /api/schedule/activate  {run_id} -> promote a previewed run to the active schedule
+POST /api/reschedule      multipart: 8 instance CSVs + `scenario` + `weather_enabled` ('true'|'false') -> full schedule (a preview)
+POST /api/schedule/activate  {run_id} -> promote a previewed run to the active schedule (persisted to disk)
 GET  /api/schedule/active    the active schedule, 204 until one has been activated
+GET  /api/weather         daily outlook for the bundled horizon (Open-Meteo)
 GET  /api/download/{scenario}/{file}   SCHEDULE_ACCESS | SCHEDULE_OCCUPANCY | RESULTS
+
+Weather-aware scheduling: see solver/weather.py. The active schedule and the
+weather cache live under STATE_DIR (backend/state) so they survive restarts.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import json
 import pathlib
 import time
 import uuid
@@ -46,9 +51,13 @@ from solver import (
     registered,
     solve_scenario,
 )
+from solver import WeatherOutlook, horizon_dates
 from solver.network import Network, build_activity_plans
+from weather_service import WeatherUnavailable, coordinates, fetch_outlook
 
 DATA_DIR = pathlib.Path(__file__).parent / "data"
+STATE_DIR = pathlib.Path(__file__).parent / "state"
+ACTIVE_FILE = STATE_DIR / "active_schedule.json"
 
 app = FastAPI(
     title="Railway Track Access Scheduler",
@@ -86,6 +95,7 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
     cal = Calendar(data.parameters.horizon_start, data.parameters.horizon_weeks)
     net = Network.build(data)
     plans = build_activity_plans(data, net, cal)
+    weather: Optional[WeatherOutlook] = data.weather
     contracts = data.contract_map()
     acts = data.activity_map()
 
@@ -195,8 +205,16 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
         "network": {
             "lines": [line.model_dump() for line in data.lines],
             "stations": [station.model_dump() for station in data.stations],
-            "sectors": [sector.model_dump() for sector in data.sectors],
+            "sectors": [
+                {**sector.model_dump(),
+                 "sector_kind": net.sector_kind.get(f"SEC:{sector.line_code}:{sector.from_station_id}_{sector.to_station_id}", "tunnel")}
+                for sector in data.sectors
+            ],
         },
+        "weather_enabled": weather is not None,
+        "weather_aware": weather is not None,   # legacy alias
+        "weather_outages": sum(net.outage.values()),
+        "weather_severe_weeks": sorted({w for (_, w) in net.outage}),
         "results": [r.model_dump() for r in out.results],
         "contracts": [
             {
@@ -217,6 +235,42 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
     }
 
 
+def _persist_active() -> None:
+    """Write the active run to disk so it survives a restart. Call with _RUN_LOCK held."""
+    run = _RUNS.get(_ACTIVE_RUN) if _ACTIVE_RUN else None
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if run is None:
+        ACTIVE_FILE.unlink(missing_ok=True)
+        return
+    ACTIVE_FILE.write_text(json.dumps({"run_id": _ACTIVE_RUN, **run}, default=str), encoding="utf-8")
+
+
+def _restore_active() -> None:
+    """Reload the persisted active run at import time; a corrupt file is ignored."""
+    global _ACTIVE_RUN
+    if not ACTIVE_FILE.exists():
+        return
+    try:
+        saved = json.loads(ACTIVE_FILE.read_text(encoding="utf-8"))
+        run_id = saved.pop("run_id")
+        with _RUN_LOCK:
+            _RUNS[run_id] = saved
+            _ACTIVE_RUN = run_id
+            _LAST_RUN[saved["scenario"]] = saved["csv"]
+    except (ValueError, KeyError, TypeError):
+        pass
+
+
+def _outlook_for(data: InstanceData) -> tuple[Optional[WeatherOutlook], Optional[str]]:
+    """(outlook, error) for the instance horizon; never raises."""
+    lat, lon = coordinates(data.parameters.extra)
+    start, end = horizon_dates(data.parameters.horizon_start, data.parameters.horizon_weeks)
+    try:
+        return fetch_outlook(lat, lon, start, end, cache_dir=STATE_DIR / "weather"), None
+    except WeatherUnavailable as exc:
+        return None, str(exc)
+
+
 def _store_run(out: SolveOutput, view: dict) -> str:
     """Remember a solve (CSV rows + view-model) under a fresh run_id; the active run is never evicted."""
     csv_rows = {
@@ -235,12 +289,30 @@ def _store_run(out: SolveOutput, view: dict) -> str:
     return run_id
 
 
-def _solve_and_store(scenario: str, data: InstanceData, source: str) -> dict:
+def _solve_and_store(scenario: str, data: InstanceData, source: str, weather_enabled: bool = False) -> dict:
+    """
+    Solve `data` and remember the run. With `weather_enabled`, the Open-Meteo
+    outlook is attached to the instance before solving: Network.build() then
+    zeroes one possession night at every outdoor *viaduct* `SEC:` location for
+    each severe day of a week (supply_capacity - severe_days, floored at 0),
+    while tunnels and `PLAT:` keep their full supply. solve_scenario() sees only
+    the reduced capacities, so the resulting shifts, overrun days, ECLO and
+    excess nights flow through the unchanged Scenario A/B/C score formulas.
+    """
+    # The outlook always rides along for the timeline; it only shapes supply when weather_enabled.
+    outlook, weather_error = _outlook_for(data)
+    data.weather = None
+    if weather_enabled:
+        if outlook is None:
+            raise HTTPException(status_code=503, detail={"message": f"Weather-aware scheduling needs an outlook. {weather_error}"})
+        data.weather = outlook
     started = time.perf_counter()
     out = solve_scenario(scenario, data)
     vm = build_view_model(data, out)
     vm["runtime_ms"] = round((time.perf_counter() - started) * 1000, 1)
     vm["source"] = source
+    vm["weather"] = outlook.model_dump(mode="json") if outlook else None
+    vm["weather_error"] = weather_error
     _store_run(out, vm)
     return vm
 
@@ -265,17 +337,29 @@ def schemas() -> dict:
     return {"instance": REQUIRED_HEADERS, "output": OUTPUT_HEADERS, "scenarios": SCENARIOS}
 
 
+def _bundled_instance() -> InstanceData:
+    try:
+        return load_instance_from_dir(str(DATA_DIR))
+    except CsvSchemaError as exc:
+        raise HTTPException(status_code=503, detail=f"Bundled instance unavailable: {exc}")
+
+
 @app.get("/api/schedule")
-def default_schedule(scenario: str = "A") -> dict:
+def default_schedule(scenario: str = "A", weather_enabled: bool = False, weather_aware: bool = False) -> dict:
     """Baseline run against the bundled reference instance — what the app boots with."""
     scenario = scenario.strip().upper()
     if scenario not in SCENARIOS:
         raise HTTPException(status_code=400, detail="scenario must be A, B or C")
-    try:
-        data = load_instance_from_dir(str(DATA_DIR))
-    except CsvSchemaError as exc:
-        raise HTTPException(status_code=503, detail=f"Bundled instance unavailable: {exc}")
-    return _solve_and_store(scenario, data, "bundled-reference-instance")
+    return _solve_and_store(scenario, _bundled_instance(), "bundled-reference-instance", weather_enabled or weather_aware)
+
+
+@app.get("/api/weather")
+def weather_outlook() -> dict:
+    """Daily outlook for the bundled instance horizon, for the timeline widget."""
+    outlook, error = _outlook_for(_bundled_instance())
+    if outlook is None:
+        raise HTTPException(status_code=503, detail=error)
+    return outlook.model_dump(mode="json")
 
 
 class ActivateRequest(BaseModel):
@@ -292,6 +376,7 @@ def activate_schedule(body: ActivateRequest) -> dict:
             raise HTTPException(status_code=404, detail=f"Unknown or expired run_id '{body.run_id}'")
         _ACTIVE_RUN = body.run_id
         _LAST_RUN[run["scenario"]] = run["csv"]
+        _persist_active()
         return {**run["view"], "active": True}
 
 
@@ -308,6 +393,8 @@ def active_schedule():
 @app.post("/api/reschedule")
 async def reschedule(
     scenario: str = Form("A"),
+    weather_enabled: bool = Form(False),
+    weather_aware: bool = Form(False),   # legacy alias of weather_enabled
     files: List[UploadFile] = File(default=[]),
     # also accept the 8 files posted under their own field names
     lines: Optional[UploadFile] = File(default=None),
@@ -371,7 +458,9 @@ async def reschedule(
         raise HTTPException(status_code=422, detail={"message": f"Could not parse instance: {exc}"})
 
     try:
-        return await run_in_threadpool(_solve_and_store, scenario, data, "uploaded-instance")
+        return await run_in_threadpool(_solve_and_store, scenario, data, "uploaded-instance", weather_enabled or weather_aware)
+    except HTTPException:
+        raise
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail={"message": f"Solver failed: {exc}"})
 
@@ -398,6 +487,9 @@ def download(scenario: str, filename: str, run_id: Optional[str] = None) -> Stre
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+_restore_active()
 
 
 if __name__ == "__main__":  # pragma: no cover

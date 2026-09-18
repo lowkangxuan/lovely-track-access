@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Clock,
+  CloudLightning,
   FileSpreadsheet,
   Gauge,
   Moon,
@@ -139,6 +140,14 @@ function Evaluation({ preview }) {
           <p className="text-[11px] text-slate-400 truncate">
             Scenario {preview.scenario} · {preview.scenario_label} · {preview.counts?.activities_scheduled} / {preview.counts?.activities_total} activities scheduled · solved in {preview.runtime_ms} ms
           </p>
+          {preview.weather_enabled && (
+            <p className="text-[11px] text-sky-300/90 truncate">
+              Weather-aware · {preview.weather?.days?.filter((d) => d.severe).length ?? 0} severe days in {preview.weather_severe_weeks?.length ?? 0} weeks · {preview.weather_outages} viaduct access-nights withdrawn
+              {preview.weather?.analogue_year ? ` · analogue year ${preview.weather.analogue_year}` : ""}
+              {preview.weather_outages > 0 && !(preview.evaluation?.overrun_days_total || preview.evaluation?.excess_access_nights_total || preview.evaluation?.eclo_nights_total)
+                ? " · absorbed within slack, no score penalty" : ""}
+            </p>
+          )}
         </div>
       </div>
 
@@ -180,13 +189,14 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
   const schemaNames = Object.keys(schemas);
   const [entries, setEntries] = useState(draft?.entries ?? {});
   const [scenario, setScenario] = useState(draft?.scenario ?? null);
+  const [weatherAware, setWeatherAware] = useState(!!draft?.weatherAware); // default OFF
   const [preview, setPreview] = useState(null);
   const [previewing, setPreviewing] = useState(false);
   const [implementing, setImplementing] = useState(false);
   const [error, setError] = useState("");
   const bulkRef = useRef(null);
 
-  useEffect(() => { onDraftChange?.({ entries, scenario }); }, [entries, scenario, onDraftChange]);
+  useEffect(() => { onDraftChange?.({ entries, scenario, weatherAware }); }, [entries, scenario, weatherAware, onDraftChange]);
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && !previewing && !implementing && onBack();
     window.addEventListener("keydown", onKey);
@@ -220,12 +230,17 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
     try {
       const form = new FormData();
       form.append("scenario", scenario);
+      form.append("weather_enabled", weatherAware ? "true" : "false"); // read by POST /api/reschedule
       schemaNames.forEach((n) => form.append("files", entries[n].file, n));
       const res = await fetch(`${apiBase}/api/reschedule`, { method: "POST", body: form });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         const detail = body?.detail;
         throw new Error(typeof detail === "string" ? detail : detail?.message || `Preview failed (${res.status})`);
+      }
+      // A backend that predates weather-aware scheduling ignores the field silently — say so instead of showing an unchanged score.
+      if (body.weather_enabled !== weatherAware) {
+        throw new Error("The scheduler API ignored weather_enabled — restart the FastAPI backend so the weather-aware solver is loaded.");
       }
       setPreview(body);
     } catch (e) {
@@ -264,7 +279,7 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
             <h1 className="text-sm font-semibold tracking-tight leading-tight">Editor's View</h1>
             <p className="text-[11px] text-slate-500 truncate">Upload instance CSVs, choose a scenario, preview the solve, then implement it as the active schedule.</p>
           </div>
-          <span className="ml-auto text-[11px] text-slate-500">{validCount} / {schemaNames.length} files valid{scenario ? ` · Scenario ${scenario}` : ""}</span>
+          <span className="ml-auto text-[11px] text-slate-500">{validCount} / {schemaNames.length} files valid{scenario ? ` · Scenario ${scenario}` : ""}{weatherAware ? " · weather-aware" : ""}</span>
         </div>
       </header>
 
@@ -289,6 +304,28 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
                 <FileSlot key={name} name={name} required={schemas[name]} entry={entries[name]} onFile={(file) => setFile(name, file)} />
               ))}
             </ul>
+
+            {/* weather-aware toggle — leaning right, between uploads and scenarios */}
+            <div className="flex justify-end">
+              <div
+                className={`w-full sm:w-auto sm:min-w-[300px] max-w-full overflow-hidden flex items-center justify-between gap-4 rounded-xl px-4 py-2.5 ring-1 transition-colors ${
+                  weatherAware ? "bg-sky-500/10 ring-sky-500/40" : "bg-slate-950/40 ring-slate-800"}`}
+                title="Severe weather days withdraw possession nights from outdoor viaduct sectors; tunnels and platforms are unaffected."
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <CloudLightning className={`h-4 w-4 shrink-0 ${weatherAware ? "text-sky-300" : "text-slate-500"}`} />
+                  <span id="weather-toggle-label" className="text-sm font-medium text-slate-200 truncate">Weather-Aware Scheduling</span>
+                </span>
+                <span className="flex items-center gap-2 shrink-0">
+                  <span className={`text-[10px] font-medium tabular-nums ${weatherAware ? "text-sky-300" : "text-slate-500"}`}>{weatherAware ? "ON" : "OFF"}</span>
+                  <button type="button" role="switch" aria-checked={weatherAware} aria-labelledby="weather-toggle-label"
+                    onClick={() => { setWeatherAware((v) => !v); setPreview(null); }}
+                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400 ${weatherAware ? "bg-sky-500" : "bg-slate-700"}`}>
+                    <span className={`absolute top-0.5 left-0 h-4 w-4 rounded-full bg-white shadow transition-transform ${weatherAware ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+                  </button>
+                </span>
+              </div>
+            </div>
 
             <div>
               <h3 className="text-[11px] uppercase tracking-wider text-slate-400 mb-2">Scenario</h3>

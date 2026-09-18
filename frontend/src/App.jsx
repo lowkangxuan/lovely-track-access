@@ -6,6 +6,10 @@ import {
   ChevronRight,
   ClipboardList,
   Clock,
+  CloudLightning,
+  CloudRain,
+  CloudRainWind,
+  Sun,
   Gauge,
   KeyRound,
   Layers,
@@ -21,6 +25,7 @@ import {
 } from "lucide-react";
 
 import EditorView from "./EditorView.jsx";
+import { loadDraft, saveDraft } from "./draft-store.js";
 import Metric from "./Metric.jsx";
 import TrackMap from "./TrackMap.jsx";
 import { Dialog, KdaDialog, LocationMap, MonthlyView, ScheduleToolbar, SearchDialog } from "./ScheduleControls.jsx";
@@ -184,7 +189,28 @@ function Login({ onLogin, apiOnline }) {
  * Sticky timeline strip                                              *
  * ------------------------------------------------------------------ */
 
-function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
+/** Daily outlook glyphs: condition -> icon + tone (severe conditions are heavy_rain / thunderstorm). */
+const WEATHER_GLYPHS = {
+  sun: { icon: Sun, tone: "text-amber-300/90", label: "Sun" },
+  rain: { icon: CloudRain, tone: "text-sky-300/90", label: "Rain" },
+  heavy_rain: { icon: CloudRainWind, tone: "text-rose-300", label: "Heavy rain · severe" },
+  thunderstorm: { icon: CloudLightning, tone: "text-violet-300", label: "Thunderstorm · severe" },
+};
+
+/** Group outlook days by horizon week (week 1 starts on horizon.start). */
+function weatherByWeek(weather, horizon) {
+  const byWeek = new Map();
+  if (!weather?.days?.length || !horizon?.start) return byWeek;
+  const start = new Date(`${horizon.start}T00:00:00`);
+  weather.days.forEach((d) => {
+    const week = Math.floor((new Date(`${d.date}T00:00:00`) - start) / (7 * 86400000)) + 1;
+    if (week < 1) return;
+    byWeek.set(week, [...(byWeek.get(week) ?? []), d]);
+  });
+  return byWeek;
+}
+
+function TimelineStrip({ tasks, horizon, weather, activeWeek, onPickWeek }) {
   const buckets = useMemo(() => {
     const weeks = new Map();
     let max = horizon?.weeks ?? 30;
@@ -200,6 +226,8 @@ function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
     });
     return [...weeks.values()];
   }, [tasks, horizon]);
+  const days = useMemo(() => weatherByWeek(weather, horizon), [weather, horizon]);
+  const showWeather = days.size > 0;
 
   const peak = Math.max(1, ...buckets.map((b) => b.count));
 
@@ -212,15 +240,28 @@ function TimelineStrip({ tasks, horizon, activeWeek, onPickWeek }) {
           : b.delayed ? "bg-rose-400/80"
           : b.eclo ? "bg-amber-400/80"
           : "bg-sky-400/80";
+        const outlook = days.get(b.week) ?? [];
+        const severe = outlook.filter((d) => d.severe).length;
         return (
           <button
             key={b.week}
             onClick={() => onPickWeek(b.week)}
-            title={`Week ${b.week}${b.date ? ` · ${fmtShort(b.date)}` : ""} — ${b.count} access-night${b.count === 1 ? "" : "s"}${b.eclo ? `, ${b.eclo} ECLO` : ""}`}
-            className={`group shrink-0 w-[18px] flex flex-col items-center justify-end gap-1 rounded-md px-0.5 py-1 transition-colors ${
+            title={`Week ${b.week}${b.date ? ` · ${fmtShort(b.date)}` : ""} — ${b.count} access-night${b.count === 1 ? "" : "s"}${b.eclo ? `, ${b.eclo} ECLO` : ""}${severe ? ` · ${severe} severe weather day${severe === 1 ? "" : "s"}` : ""}`}
+            className={`group shrink-0 ${showWeather ? "w-[58px]" : "w-[18px]"} flex flex-col items-center justify-end gap-1 rounded-md px-0.5 py-1 transition-colors ${
               isActive ? "bg-slate-800 ring-1 ring-sky-500/50" : "hover:bg-slate-800/60"
             }`}
           >
+            {showWeather && (
+              <span className="flex items-center gap-px h-2.5" aria-label={`Week ${b.week} weather`}>
+                {outlook.map((d) => {
+                  const glyph = WEATHER_GLYPHS[d.condition] ?? WEATHER_GLYPHS.sun;
+                  const Icon = glyph.icon;
+                  return <Icon key={d.date} className={`h-2 w-2 shrink-0 ${glyph.tone}`} aria-hidden="true">
+                    <title>{`${fmtShort(d.date)} · ${glyph.label}${d.precipitation_mm ? ` · ${d.precipitation_mm} mm` : ""}`}</title>
+                  </Icon>;
+                })}
+              </span>
+            )}
             <span className={`w-[10px] rounded-sm ${tone}`} style={{ height }} />
             <span className={`text-[9px] leading-none ${isActive ? "text-sky-300" : "text-slate-500 group-hover:text-slate-300"}`}>
               {b.week}
@@ -455,7 +496,8 @@ export default function App() {
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(null);
   const [page, setPage] = useState("dashboard"); // "dashboard" | "editor"
-  const [editorDraft, setEditorDraft] = useState(null); // uploads + scenario kept across editor visits
+  // uploads + scenario + weather toggle: kept across editor visits and persisted in localStorage
+  const [editorDraft, setEditorDraft] = useState(() => loadDraft());
   const [activeWeek, setActiveWeek] = useState(null);
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [view, setView] = useState("list");
@@ -466,6 +508,8 @@ export default function App() {
 
   const weekRefs = useRef({});
   const scrollerRef = useRef(null);
+
+  useEffect(() => { if (editorDraft) saveDraft(editorDraft); }, [editorDraft]);
 
   /* ---- boot ---- */
   useEffect(() => {
@@ -598,7 +642,7 @@ export default function App() {
           <div className="min-w-0">
             <h1 className="text-sm font-semibold tracking-tight leading-tight">Track Access Scheduler</h1>
             <p className="text-[11px] text-slate-500 truncate">
-              {data ? `${data.scenario_label} · horizon from ${fmtShort(data.horizon?.start)} · ${data.horizon?.weeks} weeks` : "Line Alpha · Line Beta"}
+              {data ? `${data.scenario_label} · horizon from ${fmtShort(data.horizon?.start)} · ${data.horizon?.weeks} weeks${data.weather_enabled ? " · weather-aware" : ""}` : "Line Alpha · Line Beta"}
             </p>
           </div>
 
@@ -625,7 +669,7 @@ export default function App() {
               onClick={() => {
                 setUser(null); setData(null); setSelected(null); setScheduleModal(null);
                 setDay(null); setFilters(EMPTY_FILTERS); setView("list"); setActiveWeek(null);
-                setEditorDraft(null); setPage("dashboard"); setMapDraft(null);
+                setPage("dashboard"); setMapDraft(null); // editorDraft is kept: uploads survive logout
               }}
               className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] text-slate-400 hover:text-slate-100 hover:bg-slate-800 ring-1 ring-slate-800"
             >
@@ -641,13 +685,24 @@ export default function App() {
               <CalendarDays className="h-3 w-3 text-slate-500" />
               <span className="text-[10px] uppercase tracking-wider text-slate-500">Possession timeline</span>
               <span className="text-[10px] text-slate-600">· click a week to jump</span>
-              <div className="ml-auto flex items-center gap-3 text-[10px] text-slate-500">
+              <div className="ml-auto flex flex-wrap items-center gap-3 text-[10px] text-slate-500">
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-sky-400/80" /> on target</span>
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-amber-400/80" /> ECLO</span>
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-rose-400/80" /> overrun</span>
+                {data?.weather?.days?.length > 0 && (
+                  <>
+                    <span className="text-slate-700">|</span>
+                    {Object.entries(WEATHER_GLYPHS).map(([key, { icon: Icon, tone, label }]) => (
+                      <span key={key} className="flex items-center gap-1"><Icon className={`h-2.5 w-2.5 ${tone}`} /> {label.split(" · ")[0]}</span>
+                    ))}
+                    <span className="text-slate-600" title={data.weather.source}>
+                      Open-Meteo{data.weather.analogue_year ? ` · analogue ${data.weather.analogue_year}` : ""}{data.weather_enabled ? " · weather-aware" : ""}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
-            <TimelineStrip tasks={visibleTasks} horizon={data?.horizon} activeWeek={activeWeek} onPickWeek={jumpToWeek} />
+            <TimelineStrip tasks={visibleTasks} horizon={data?.horizon} weather={data?.weather} activeWeek={activeWeek} onPickWeek={jumpToWeek} />
           </div>
         </div>
       </header>

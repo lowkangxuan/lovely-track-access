@@ -36,6 +36,12 @@ const stateOf = (id, occupied, buffer, selected) => ({
 
 // Buffer cells use the SVG pattern via the `fill` attribute, so they carry no fill-* class.
 const HATCH = "url(#buffer-hatch)";
+// Open-line sectors are tunnel (sheltered) or viaduct (exposed to severe weather); platforms are always sheltered.
+const KIND_BADGE = {
+  tunnel: { label: "Tunnel", tone: "fill-slate-500" },
+  viaduct: { label: "Viaduct", tone: "fill-amber-300/90" },
+};
+
 const sectorFill = ({ occupied, buffer }) =>
   occupied ? "fill-sky-400" : buffer ? "" : "fill-slate-700";
 const platformFill = ({ occupied, buffer }) =>
@@ -153,8 +159,14 @@ export default function TrackMap({ network, occupied = new Set(), buffer = new S
                         const left = Math.min(sector.from_index, sector.to_index);
                         const right = Math.max(sector.from_index, sector.to_index);
                         const status = st.occupied ? " · occupied" : st.buffer ? " · buffer exclusion" : "";
+                        const badge = KIND_BADGE[sector.sector_kind];
                         return (
-                          <Clickable key={sector.location_id} label={`${sector.location_id}${status}`} onSelect={onSelect} token={sector.location_id}>
+                          <Clickable key={sector.location_id} label={`${sector.location_id}${badge ? ` · ${badge.label}` : ""}${status}`} onSelect={onSelect} token={sector.location_id}>
+                            {eb && badge && (
+                              <text x={(x(left) + x(right)) / 2} y={y - 9} textAnchor="middle" className={`text-[8px] uppercase tracking-wide ${badge.tone}`}>
+                                {badge.label}
+                              </text>
+                            )}
                             <rect
                               x={x(left) + 14} y={y - 4} width={x(right) - x(left) - 28} height={8} rx="2"
                               fill={st.buffer && !st.occupied ? HATCH : undefined}
@@ -219,6 +231,8 @@ export default function TrackMap({ network, occupied = new Set(), buffer = new S
         <span className="flex items-center gap-1.5"><span className="h-2 w-4 rounded-sm bg-[repeating-linear-gradient(45deg,rgb(251_191_36/0.8)_0_2px,rgb(245_158_11/0.15)_2px_5px)]" /> buffer exclusion ({bufferCount})</span>
         <span className="flex items-center gap-1.5"><span className="h-2 w-4 rounded-sm bg-slate-700" /> free</span>
         <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rotate-45 rounded-[2px] border-2 border-amber-300" /> interchange</span>
+        <span className="flex items-center gap-1.5"><span className="text-[8px] uppercase tracking-wide text-amber-300/90">Viaduct</span> exposed sector</span>
+        <span className="flex items-center gap-1.5"><span className="text-[8px] uppercase tracking-wide text-slate-500">Tunnel</span> sheltered sector</span>
         <span className="flex items-center gap-1.5"><span className="h-2 w-4 rounded-sm bg-slate-700 ring-1 ring-white" /> selected</span>
         {caption && <span className="ml-auto">{caption}</span>}
       </div>

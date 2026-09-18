@@ -19,6 +19,7 @@ from datetime import date, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
 from .schemas import Activity, InstanceData
+from .weather import classify_sectors, sector_seed, severe_nights_by_week
 
 OPPOSITE = {"EB": "WB", "WB": "EB"}
 INTERCHANGE_SECTOR_KEY = "H01_H02"
@@ -70,6 +71,10 @@ class Network:
     sector_index: Dict[Tuple[str, str], int] = field(default_factory=dict)
     known_locations: Set[str] = field(default_factory=set)
     supply: Dict[str, int] = field(default_factory=dict)
+    # "SEC:ALP:S01_S02" -> "tunnel" | "viaduct" (platforms are always sheltered)
+    sector_kind: Dict[str, str] = field(default_factory=dict)
+    # (location_id, week) -> possession nights lost to severe weather
+    outage: Dict[Tuple[str, int], int] = field(default_factory=dict)
 
     @classmethod
     def build(cls, data: InstanceData) -> "Network":
@@ -96,7 +101,30 @@ class Network:
 
         net.supply = data.supply_map()
         net.known_locations = set(net.supply.keys())
+
+        net.sector_kind = classify_sectors(
+            (f"SEC:{s.line_code}:{s.from_station_id}_{s.to_station_id}" for s in data.sectors),
+            sector_seed(data.parameters.extra),
+        )
+        if data.weather is not None:
+            by_week = severe_nights_by_week(data.weather, data.parameters.horizon_start)
+            for loc in net.supply:
+                if net.location_kind(loc) != "viaduct":
+                    continue
+                for week, lost in by_week.items():
+                    net.outage[(loc, week)] = lost
         return net
+
+    # -- weather ----------------------------------------------------------- #
+
+    def location_kind(self, location_id: str) -> str:
+        """'tunnel' | 'viaduct' for open-line sectors, 'platform' for PLAT:, 'unknown' otherwise."""
+        ref = parse_location(location_id)
+        if ref is None:
+            return "unknown"
+        if ref.kind == "PLAT":
+            return "platform"
+        return self.sector_kind.get(f"SEC:{ref.line}:{ref.key}", "tunnel")
 
     # -- path ------------------------------------------------------------- #
 
@@ -208,8 +236,12 @@ class Network:
 
         return sorted(footprint)
 
-    def capacity(self, location_id: str) -> int:
-        return self.supply.get(location_id, 0)
+    def capacity(self, location_id: str, week: Optional[int] = None) -> int:
+        """Possession nights at a location; with `week`, net of that week's weather outage."""
+        cap = self.supply.get(location_id, 0)
+        if week is None:
+            return cap
+        return max(0, cap - self.outage.get((location_id, week), 0))
 
 
 # --------------------------------------------------------------------------- #

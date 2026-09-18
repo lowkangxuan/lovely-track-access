@@ -87,8 +87,8 @@ def validate_schedule(data, out):
     for (loc, week), groups in supply_groups.items():
         if loc not in net.supply:
             fail("capacity", f"Unknown location {loc}")
-        if out.scenario != "B" and len(groups) > net.capacity(loc) + (out.scenario == "C"):
-            fail("capacity", f"{loc} wk{week}: {len(groups)} nights exceed supply {net.capacity(loc)}")
+        if out.scenario != "B" and len(groups) > net.capacity(loc, week) + (out.scenario == "C"):
+            fail("capacity", f"{loc} wk{week}: {len(groups)} nights exceed supply {net.capacity(loc, week)}")
     for (cn, typ, week), nights in contract_nights.items():
         if len(nights) > contracts[cn].number_of_maximum_access_per_week:
             fail("allocation", f"{cn}/{typ} wk{week}: weekly allocation exceeded")

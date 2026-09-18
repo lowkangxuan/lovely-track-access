@@ -85,7 +85,7 @@ def _greedy(data, policy, plans, net, cal, mode):
                         break
                     used = location_slots[loc, week]
                     if (policy.excess is not None and slot not in used
-                            and len(used) >= net.capacity(loc) + policy.excess):
+                            and len(used) >= net.capacity(loc, week) + policy.excess):
                         valid = False
                         break
                 if valid:
@@ -233,7 +233,7 @@ def optimize(data, policy):
         model.add(sum(v for a, v in entries if contracts[plans[a].activity.contract_number].access_type == "PC") <= 1)
         location_used[loc, w].append(used)
     for (loc, w), used in location_used.items():
-        cap = net.capacity(loc)
+        cap = net.capacity(loc, w)
         if policy.excess is not None:
             model.add(sum(used) <= cap + policy.excess)
         excess = model.new_int_var(0, slots, f"excess_{loc}_{w}")

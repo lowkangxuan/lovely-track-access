@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from .weather import WeatherOutlook
+
 # --------------------------------------------------------------------------- #
 # Canonical CSV headers                                                        #
 # --------------------------------------------------------------------------- #
@@ -168,6 +170,8 @@ class InstanceData(BaseModel):
     parameters: Parameters
     contracts: List[Contract]
     activities: List[Activity]
+    # Set by the API when weather-aware scheduling is on; None keeps supply as uploaded.
+    weather: Optional[WeatherOutlook] = None
 
     # convenience lookups -------------------------------------------------- #
     def contract_map(self) -> Dict[str, Contract]:

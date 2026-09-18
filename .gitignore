@@ -1,3 +1,6 @@
+# runtime state (active schedule, weather cache)
+backend/state/
+
 # python
 __pycache__/
 *.py[cod]

@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, List
 
-from .network import Calendar
+from .network import Calendar, Network
 from .schemas import AccessRow, InstanceData, OccupancyRow, ResultRow, SoftScores
 
 CONTRACT_WEIGHT = {1: 100.0, 2: 10.0, 3: 1.0}
@@ -59,8 +59,8 @@ def build_results(
 def excess_access_nights(
     data: InstanceData, occupancy: List[OccupancyRow]
 ) -> tuple[int, List[dict]]:
-    """Slots used beyond supply_capacity, summed over location-weeks."""
-    supply = data.supply_map()
+    """Slots used beyond supply_capacity (net of weather outages), summed over location-weeks."""
+    net = Network.build(data)
     used: Dict[tuple, set] = defaultdict(set)
     for row in occupancy:
         used[(row.location_id, row.week)].add(row.co_share_group)
@@ -68,7 +68,7 @@ def excess_access_nights(
     total = 0
     hotspots: List[dict] = []
     for (loc, week), groups in used.items():
-        cap = supply.get(loc, 0)
+        cap = net.capacity(loc, week)
         n = len(groups)
         if n > cap:
             total += n - cap

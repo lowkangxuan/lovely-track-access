@@ -1,7 +1,9 @@
 import csv
+from datetime import timedelta
 import io
 import os
 from pathlib import Path
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
@@ -13,9 +15,23 @@ from solver.network import Calendar, Network, build_activity_plans
 from solver.optimizer import _output
 from solver.policies import STRICT_SUPPLY, STRICT_SCHEDULE, BALANCED
 from solver.validation import validate_schedule
+from solver.weather import WeatherOutlook, classify_condition, classify_sectors, make_day
+import weather_service
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 os.environ["SOLVER_TIME_LIMIT_SECONDS"] = "3"
+
+
+def synthetic_outlook(data, severe_weeks):
+    """A horizon outlook that is sunny except for `severe_weeks` -> number of stormy days that week."""
+    start = data.parameters.horizon_start
+    days = []
+    for offset in range(data.parameters.horizon_weeks * 7):
+        day = start + timedelta(days=offset)
+        week, dow = offset // 7 + 1, offset % 7
+        stormy = dow < severe_weeks.get(week, 0)
+        days.append(make_day(day, 95 if stormy else 1, 40.0 if stormy else 0.0))
+    return WeatherOutlook(days=days, source="synthetic", latitude=1.35, longitude=103.82)
 
 
 def small(count=1, access_type="C", nature="Non-live (Others)"):
@@ -149,11 +165,63 @@ class SolverTests(unittest.TestCase):
         self.assertIn("workload", {v.rule for v in validate_schedule(data, out)})
 
 
+class WeatherTests(unittest.TestCase):
+    def test_sector_split_is_deterministic_60_40_and_platforms_are_sheltered(self):
+        data = load_instance_from_dir(str(DATA))
+        ids = [f"SEC:{x.line_code}:{x.from_station_id}_{x.to_station_id}" for x in data.sectors]
+        kinds = classify_sectors(ids, 42)
+        self.assertEqual(kinds, classify_sectors(reversed(ids), 42))
+        self.assertEqual(sum(k == "tunnel" for k in kinds.values()), round(0.6 * len(ids)))
+        self.assertNotEqual(kinds, classify_sectors(ids, 7))
+        net = Network.build(data)
+        self.assertEqual(net.location_kind("PLAT:ALP:S01:EB"), "platform")
+        self.assertIn(net.location_kind("SEC:ALP:S01_S02:WB"), ("tunnel", "viaduct"))
+        self.assertEqual(net.location_kind("SEC:ALP:S01_S02:WB"), net.location_kind("SEC:ALP:S01_S02:EB"))
+        self.assertEqual(classify_condition(95, 0.0), ("thunderstorm", True))
+        self.assertEqual(classify_condition(63, 27.4), ("heavy_rain", True))
+        self.assertEqual(classify_condition(61, 3.0), ("rain", False))
+        self.assertEqual(classify_condition(1, 0.0), ("sun", False))
+
+    def test_severe_days_zero_viaduct_nights_but_not_tunnels_or_platforms(self):
+        data = load_instance_from_dir(str(DATA))
+        data.weather = synthetic_outlook(data, {2: 3, 5: 7})
+        net = Network.build(data)
+        viaducts = [loc for loc in net.supply if net.location_kind(loc) == "viaduct"]
+        tunnels = [loc for loc in net.supply if net.location_kind(loc) == "tunnel"]
+        self.assertTrue(viaducts and tunnels)
+        for loc in viaducts:
+            self.assertEqual(net.capacity(loc, 2), max(0, net.capacity(loc) - 3))
+            self.assertEqual(net.capacity(loc, 5), 0)
+            self.assertEqual(net.capacity(loc, 1), net.capacity(loc))
+        for loc in tunnels + ["PLAT:ALP:S01:EB", "PLAT:BET:H01:WB"]:
+            self.assertEqual(net.capacity(loc, 5), net.capacity(loc))
+        # the standard solver honours the reduced supply and the validator agrees
+        out = solve_scenario("A", data)
+        self.assertTrue(out.feasible, out.hard_violations)
+        used = {}
+        for row in out.schedule_occupancy:
+            used.setdefault((row.location_id, row.week), set()).add(row.co_share_group)
+        for loc in viaducts:
+            self.assertEqual(len(used.get((loc, 5), set())), 0)
+        self.assertEqual(validate_schedule(data, out), [])
+
+
 class InputAndApiTests(unittest.TestCase):
     def setUp(self):
         self.files = {name: (DATA / name).read_text() for name in REQUIRED_HEADERS}
         self.client = TestClient(app)
         main._ACTIVE_RUN = None  # activation is process-wide state; start each test clean
+        # keep tests off the network and off the real state directory
+        self.tmp = tempfile.TemporaryDirectory()
+        main.STATE_DIR = Path(self.tmp.name)
+        main.ACTIVE_FILE = main.STATE_DIR / "active_schedule.json"
+        self._fetch = main.fetch_outlook
+        self.outlook = synthetic_outlook(load_instance_from_dir(str(DATA)), {2: 3, 5: 7})
+        main.fetch_outlook = lambda lat, lon, start, end, cache_dir=None, today=None: self.outlook
+
+    def tearDown(self):
+        main.fetch_outlook = self._fetch
+        self.tmp.cleanup()
 
     def test_invalid_numbers_duplicates_and_cycles(self):
         bad = self.files.copy()
@@ -215,6 +283,52 @@ class InputAndApiTests(unittest.TestCase):
         self.assertEqual(active["scenario"], "B")
         self.assertTrue(active["active"])
         self.assertIn("PREVIEWED", {t["activity_id"] for t in active["tasks"]})
+
+    def test_weather_aware_preview_activation_persists_to_disk(self):
+        uploads = [("files", (name, raw, "text/csv")) for name, raw in self.files.items()]
+        body = self.client.post("/api/reschedule", data={"scenario": "A", "weather_enabled": "true"}, files=uploads).json()
+        self.assertTrue(body["weather_enabled"])
+        self.assertTrue(body["weather_aware"])  # legacy alias still served
+        self.assertEqual(body["weather_severe_weeks"], [2, 5])
+        self.assertEqual(len(body["weather"]["days"]), 30 * 7)
+        self.assertEqual(sum(1 for d in body["weather"]["days"] if d["severe"]), 10)
+        kinds = {s["sector_id"]: s["sector_kind"] for s in body["network"]["sectors"]}
+        self.assertEqual(sorted(set(kinds.values())), ["tunnel", "viaduct"])
+        self.assertGreater(body["weather_outages"], 0)
+        # weather off: same instance, outlook still shipped for the timeline, supply untouched
+        plain = self.client.post("/api/reschedule", data={"scenario": "A", "weather_enabled": "false"}, files=uploads).json()
+        self.assertFalse(plain["weather_enabled"])
+        self.assertEqual(set(body["soft_scores"]), set(plain["soft_scores"]))  # no custom score metrics
+        # a stormy season must move the standard objective (through overrun / excess / ECLO, nothing else)
+        self.outlook = synthetic_outlook(load_instance_from_dir(str(DATA)), {w: 7 for w in range(1, 16)})
+        stormy = self.client.post("/api/reschedule", data={"scenario": "A", "weather_enabled": "true"}, files=uploads).json()
+        self.assertEqual(stormy["weather_severe_weeks"], list(range(1, 16)))
+        self.assertNotEqual(stormy["soft_scores"]["objective_score"], plain["soft_scores"]["objective_score"])
+        self.assertGreater(stormy["soft_scores"]["overrun_days_total"], plain["soft_scores"]["overrun_days_total"])
+        self.assertEqual(plain["weather_outages"], 0)
+        self.assertEqual(len(plain["weather"]["days"]), 30 * 7)
+        # implement, then simulate a restart: the active run comes back from disk
+        self.assertEqual(self.client.post("/api/schedule/activate", json={"run_id": body["run_id"]}).status_code, 200)
+        self.assertTrue(main.ACTIVE_FILE.exists())
+        main._RUNS.clear()
+        main._ACTIVE_RUN = None
+        self.assertEqual(self.client.get("/api/schedule/active").status_code, 204)
+        main._restore_active()
+        restored = self.client.get("/api/schedule/active").json()
+        self.assertEqual(restored["run_id"], body["run_id"])
+        self.assertTrue(restored["weather_enabled"])
+        for filename in OUTPUT_HEADERS:
+            self.assertEqual(self.client.get(f"/api/download/A/{filename}?run_id={body['run_id']}").status_code, 200)
+
+    def test_weather_unavailable_only_blocks_weather_aware_solves(self):
+        def unavailable(*args, **kwargs):
+            raise weather_service.WeatherUnavailable("offline")
+        main.fetch_outlook = unavailable
+        uploads = [("files", (name, raw, "text/csv")) for name, raw in self.files.items()]
+        self.assertEqual(self.client.post("/api/reschedule", data={"scenario": "A", "weather_enabled": "true"}, files=uploads).status_code, 503)
+        body = self.client.post("/api/reschedule", data={"scenario": "A"}, files=uploads).json()
+        self.assertIsNone(body["weather"])
+        self.assertIn("offline", body["weather_error"])
 
     def test_missing_duplicate_uploads_and_bad_scenario(self):
         self.assertEqual(self.client.get("/api/schedule?scenario=Z").status_code, 400)

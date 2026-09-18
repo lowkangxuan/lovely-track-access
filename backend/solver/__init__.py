@@ -3,6 +3,7 @@
 from .loader import CsvSchemaError, load_instance_from_dir, parse_instance, validate_headers
 from .network import Calendar, Network, build_activity_plans
 from .registry import get_solver, register, registered, solve_scenario
+from .weather import WeatherDay, WeatherOutlook, classify_sectors, horizon_dates, make_day
 from .schemas import (
     OUTPUT_HEADERS,
     REQUIRED_HEADERS,
@@ -42,4 +43,9 @@ __all__ = [
     "Violation",
     "Activity",
     "Contract",
+    "WeatherDay",
+    "WeatherOutlook",
+    "classify_sectors",
+    "horizon_dates",
+    "make_day",
 ]

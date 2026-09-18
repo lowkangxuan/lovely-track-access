@@ -63,8 +63,10 @@ test("network tracks prefer sectors from the payload and drop ones that referenc
     { sector_id: "SEC:ALP:S01_S02", line_code: "ALP", from_station_id: "S01", to_station_id: "S02", seq: 1, is_shared: 0 },
     { sector_id: "SEC:ALP:H01_S09", line_code: "ALP", from_station_id: "H01", to_station_id: "S09", seq: 3, is_shared: 0 },
   ];
+  sectors[0].sector_kind = "viaduct";
   const [alpha] = networkTracks({ ...network, sectors });
   assert.deepEqual(alpha.tracks[0].sectors.map((s) => [s.location_id, s.is_shared]), [["SEC:ALP:S01_S02:EB", 0], ["SEC:ALP:S02_H01:EB", 1]]);
+  assert.deepEqual(alpha.tracks[1].sectors.map((s) => s.sector_kind), [null, "viaduct"]);
   assert.deepEqual(networkTracks(null), []);
 });
 
@@ -106,4 +108,23 @@ test("editor validates uploaded headers against the schema registry and routes f
   assert.equal(bad.ok, false);
   assert.deepEqual(bad.missing, ["line_name"]);
   assert.equal(bad.message, "01_LINES.csv is invalid. Required headers: line_code, line_name. Missing: line_name.");
+});
+
+test("editor drafts round-trip through storage with File objects rebuilt", async () => {
+  const { serializeDraft, deserializeDraft, saveDraft, loadDraft, DRAFT_KEY } = await import("./draft-store.js");
+  const file = new File(["line_code,line_name\nALP,Alpha\n"], "my_01_LINES.csv", { type: "text/csv" });
+  const draft = { entries: { "01_LINES.csv": { file, ok: true, rowCount: 1, message: "2 columns" } }, scenario: "B", weatherAware: true };
+  const stored = await serializeDraft(draft);
+  assert.equal(stored.entries["01_LINES.csv"].text, "line_code,line_name\nALP,Alpha\n");
+  const back = deserializeDraft(stored);
+  assert.equal(back.scenario, "B");
+  assert.equal(back.weatherAware, true);
+  assert.equal(back.entries["01_LINES.csv"].file.name, "my_01_LINES.csv");
+  assert.equal(await back.entries["01_LINES.csv"].file.text(), "line_code,line_name\nALP,Alpha\n");
+  const memory = new Map();
+  const storage = { setItem: (k, v) => memory.set(k, v), getItem: (k) => memory.get(k) ?? null, removeItem: (k) => memory.delete(k) };
+  assert.equal(await saveDraft(draft, storage), true);
+  assert.ok(memory.has(DRAFT_KEY));
+  assert.equal(loadDraft(storage).entries["01_LINES.csv"].ok, true);
+  assert.equal(loadDraft({ getItem: () => "not json" }), null);
 });

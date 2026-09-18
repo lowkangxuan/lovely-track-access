@@ -142,8 +142,8 @@ class _State:
         staged: List[Tuple[Tuple[str, int], _Slot, bool]] = []
 
         for loc in path:
-            cap = self.net.capacity(loc)
-            limit = cap + self.excess_allowance if cap else 1 + self.excess_allowance
+            cap = self.net.capacity(loc, week)
+            limit = cap + self.excess_allowance if self.net.capacity(loc) else 1 + self.excess_allowance
             key = (loc, week)
             existing = self.slots[key]
 
