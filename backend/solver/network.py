@@ -118,41 +118,21 @@ class Network:
         if not sec_keys or not stations:
             return [x for x in {a.id, b.id} if x]
 
-        def sec_span(ref: LocationRef) -> Optional[Tuple[int, int]]:
-            if ref.kind == "SEC":
-                i = self.sector_index.get((ref.line, ref.key))
-                return (i, i) if i is not None else None
-            # a platform: the sectors either side of it
-            si = self.station_index.get((ref.line, ref.key))
-            if si is None:
-                return None
-            lo = max(0, si - 1)
-            hi = min(len(sec_keys) - 1, si)
-            return (lo, hi)
+        # Platforms are points; sectors are intervals between adjacent stations.
+        # A platform-only job must not silently book the two adjacent tunnels.
+        def extent(ref: LocationRef) -> Tuple[int, int]:
+            if ref.kind == "PLAT":
+                i = self.station_index[(ref.line, ref.key)]
+                return i, i
+            i = self.sector_index[(ref.line, ref.key)]
+            return i, i + 1
 
-        sa, sb = sec_span(a), sec_span(b)
-        if sa is None or sb is None:
-            return [x for x in {a.id, b.id} if x]
-
-        lo = min(sa[0], sb[0])
-        hi = max(sa[1], sb[1])
-
-        locations: List[str] = []
-        for i in range(lo, hi + 1):
-            locations.append(f"SEC:{line}:{sec_keys[i]}:{bound}")
-
-        # platforms: every station touched, from the first sector's "from"
-        # station through the last sector's "to" station.
-        first_from = sec_keys[lo].split("_")[0]
-        last_to = sec_keys[hi].split("_")[-1]
-        i0 = self.station_index.get((line, first_from), 0)
-        i1 = self.station_index.get((line, last_to), len(stations) - 1)
-        for i in range(min(i0, i1), max(i0, i1) + 1):
-            locations.append(f"PLAT:{line}:{stations[i]}:{bound}")
-
-        # keep only locations the instance actually declares supply for
-        out = [l for l in locations if not self.known_locations or l in self.known_locations]
-        return out or locations
+        sa, sb = extent(a), extent(b)
+        lo, hi = min(sa[0], sb[0]), max(sa[1], sb[1])
+        return (
+            [f"SEC:{line}:{sec_keys[i]}:{bound}" for i in range(lo, hi)]
+            + [f"PLAT:{line}:{stations[i]}:{bound}" for i in range(lo, hi + 1)]
+        )
 
     # -- buffers ----------------------------------------------------------- #
 
@@ -182,15 +162,24 @@ class Network:
             if i is not None:
                 by_line_bound.setdefault((ref.line, ref.bound), []).append(i)
 
-        # The exclusion ring is measured in tunnel sectors (05_BUFFER_LOCATION
-        # is denominated in sectors); platforms enter the footprint only where
-        # they are actually worked, i.e. via `path` below.
+        # A platform-only closure extends N sectors in each direction.
+        for loc_id in path:
+            ref = parse_location(loc_id)
+            if ref and ref.kind == "PLAT" and buffer_sectors > 0 and (ref.line, ref.bound) not in by_line_bound:
+                si = self.station_index[(ref.line, ref.key)]
+                keys = self.sector_keys_by_line[ref.line]
+                for i in range(max(0, si - buffer_sectors), min(len(keys), si + buffer_sectors)):
+                    footprint.add(f"SEC:{ref.line}:{keys[i]}:{ref.bound}")
+                    for station in keys[i].split("_"):
+                        footprint.add(f"PLAT:{ref.line}:{station}:{ref.bound}")
         if buffer_sectors > 0:
             for (line, bound), idxs in by_line_bound.items():
                 sec_keys = self.sector_keys_by_line.get(line, [])
                 lo, hi = min(idxs), max(idxs)
                 for i in range(max(0, lo - buffer_sectors), min(len(sec_keys) - 1, hi + buffer_sectors) + 1):
                     footprint.add(f"SEC:{line}:{sec_keys[i]}:{bound}")
+                    for station in sec_keys[i].split("_"):
+                        footprint.add(f"PLAT:{line}:{station}:{bound}")
         footprint.update(path)
 
         if mirror_opposite:
@@ -217,8 +206,6 @@ class Network:
                         for hub in ("H01", "H02"):
                             footprint.add(f"PLAT:{line}:{hub}:{bound}")
 
-        if self.known_locations:
-            footprint = {l for l in footprint if l in self.known_locations}
         return sorted(footprint)
 
     def capacity(self, location_id: str) -> int:
@@ -282,7 +269,7 @@ def build_activity_plans(
         path = net.expand_path(act.start_location_id, act.end_location_id)
         zone = net.buffer_footprint(path, buf_sectors, mirror)
         lines = {
-            r.line for l in path if (r := parse_location(l)) is not None
+            r.line for l in zone if (r := parse_location(l)) is not None
         }
         plans[act.activity_id] = ActivityPlan(
             activity=act,
@@ -302,7 +289,7 @@ def topological_order(
     """
     Predecessor-respecting order (rule 3). `rank` is an optional tie-break
     priority (lower goes first); without it, contract tier then activity tier.
-    Cycles are broken deterministically rather than raising.
+    Cycles are rejected rather than scheduled out of order.
     """
     contracts = data.contract_map()
     acts = data.activity_map()
@@ -339,5 +326,6 @@ def topological_order(
         pending = remaining
         if not progressed:
             break
-    order.extend(pending)  # cycle fallback
+    if pending:
+        raise ValueError("Predecessor cycle: " + ", ".join(pending))
     return order

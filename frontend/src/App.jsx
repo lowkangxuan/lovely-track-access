@@ -267,7 +267,7 @@ function TaskCard({ task, onOpen, registerRef }) {
     <button
       ref={(el) => registerRef(task.week, el)}
       onClick={() => onOpen(task)}
-      className="group shrink-0 w-[330px] text-left rounded-xl bg-slate-900/80 hover:bg-slate-900 ring-1 ring-slate-800 hover:ring-sky-500/40 transition-all px-4 py-3.5"
+      className="group shrink-0 w-full min-w-0 text-left rounded-xl bg-slate-900/80 hover:bg-slate-900 ring-1 ring-slate-800 hover:ring-sky-500/40 transition-all px-4 py-3.5"
     >
       <div className="flex items-center gap-3">
         {/* Left — contract : activity */}
@@ -332,12 +332,13 @@ const Field = ({ label, value, mono = false, tone = "" }) => (
   </div>
 );
 
-const Metric = ({ icon: Icon, label, value, tone }) => (
-  <div className="rounded-lg bg-slate-950/60 ring-1 ring-slate-800 px-3 py-2.5">
+const Metric = ({ icon: Icon, label, value, tone, description, title }) => (
+  <div title={title} className="rounded-lg bg-slate-950/60 ring-1 ring-slate-800 px-3 py-2.5">
     <div className="text-[10px] uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
       <Icon className="h-3 w-3" /> {label}
     </div>
     <div className={`mt-0.5 text-lg font-semibold tabular-nums ${tone || "text-slate-100"}`}>{value}</div>
+    {description && <div className="mt-0.5 text-[10px] text-slate-400">{description}</div>}
   </div>
 );
 
@@ -658,6 +659,7 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [showReschedule, setShowReschedule] = useState(false);
   const [activeWeek, setActiveWeek] = useState(null);
+  const [uploadedFiles, setUploadedFiles] = useState(null);
 
   const weekRefs = useRef({});
   const scrollerRef = useRef(null);
@@ -683,7 +685,7 @@ export default function App() {
 
   const loadBaseline = useCallback(async (scenario = "A") => {
     setLoading(true);
-    setLoadingLabel("Solving baseline schedule…");
+    setLoadingLabel("Solving reference schedule…");
     setError("");
     try {
       const res = await fetch(`${API_BASE}/api/schedule?scenario=${scenario}`);
@@ -691,6 +693,9 @@ export default function App() {
       const body = await res.json();
       weekRefs.current = {};
       setData(body);
+      setUploadedFiles(null);
+      setActiveWeek(null);
+      scrollerRef.current?.scrollTo({ top: 0 });
       setApiOnline(true);
     } catch (e) {
       setError(
@@ -722,6 +727,9 @@ export default function App() {
       }
       weekRefs.current = {};
       setData(body);
+      setUploadedFiles(files);
+      setActiveWeek(null);
+      scrollerRef.current?.scrollTo({ top: 0 });
       setSelected(null);
       setShowReschedule(false);
     } catch (e) {
@@ -742,12 +750,14 @@ export default function App() {
   const stats = useMemo(() => {
     const activities = new Set(tasks.map((t) => t.activity_id));
     const contracts = new Set(tasks.map((t) => t.contract_number));
-    const delayed = new Set(tasks.filter((t) => t.days_delayed > 0).map((t) => t.activity_id));
+    const delayedAccesses = tasks.filter((t) => t.days_delayed > 0);
+    const delayedActivities = new Set(delayedAccesses.map((t) => t.activity_id));
     return {
       accessNights: tasks.length,
       activities: activities.size,
       contracts: contracts.size,
-      delayed: delayed.size,
+      delayed: delayedAccesses.length,
+      delayedActivities: delayedActivities.size,
       eclo: tasks.filter((t) => t.eclo === 1).length,
     };
   }, [tasks]);
@@ -756,7 +766,9 @@ export default function App() {
     setActiveWeek(week);
     const el = weekRefs.current[week];
     if (el && scrollerRef.current) {
-      scrollerRef.current.scrollTo({ left: el.offsetLeft - 16, behavior: "smooth" });
+      const container = scrollerRef.current;
+      const top = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 8;
+      container.scrollTo({ top, behavior: "smooth" });
     }
   }, []);
 
@@ -835,12 +847,33 @@ export default function App() {
           </div>
         )}
 
+        {isAdmin && (
+          <div className="flex flex-wrap items-center gap-2" aria-label="Scenario selection">
+            {SCENARIOS.map((scenario) => (
+              <button key={scenario.id} disabled={loading} aria-pressed={data?.scenario === scenario.id}
+                onClick={() => uploadedFiles ? runReschedule(uploadedFiles, scenario.id) : loadBaseline(scenario.id)}
+                title={scenario.hint}
+                className={`rounded-lg px-3 py-2 text-xs ring-1 ${data?.scenario === scenario.id ? "bg-sky-500/15 text-sky-300 ring-sky-500" : "text-slate-400 ring-slate-700 hover:text-slate-100"}`}>
+                {scenario.name}
+              </button>
+            ))}
+            <span className="text-xs text-slate-500">{uploadedFiles ? "Using your 8 uploaded CSVs" : "Using bundled reference CSVs"}</span>
+          </div>
+        )}
+
         {/* summary tiles */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
           <Metric icon={Moon} label="Access nights" value={stats.accessNights} />
           <Metric icon={ClipboardList} label="Activities" value={stats.activities} />
           <Metric icon={Layers} label="Contracts" value={stats.contracts} />
-          <Metric icon={Gauge} label="Overrunning" value={stats.delayed} tone={stats.delayed ? "text-rose-300" : "text-emerald-300"} />
+          <Metric
+            icon={Gauge}
+            label="Overrunning accesses"
+            value={stats.delayed}
+            description={`Across ${stats.delayedActivities} ${stats.delayedActivities === 1 ? "activity" : "activities"}`}
+            title="Counts every access card belonging to an activity that finishes after its planned completion date, including accesses before that date."
+            tone={stats.delayed ? "text-rose-300" : "text-emerald-300"}
+          />
           <Metric icon={Moon} label="ECLO nights" value={stats.eclo} tone={stats.eclo ? "text-amber-300" : ""} />
           <Metric
             icon={Gauge}
@@ -868,18 +901,18 @@ export default function App() {
 
         {/* task cards */}
         <section>
-          <div className="flex items-center gap-2 mb-2">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
             <h2 className="text-sm font-medium text-slate-200">Scheduled possessions</h2>
             <span className="text-[11px] text-slate-500">
               {tasks.length} access-night{tasks.length === 1 ? "" : "s"}
               {user.contracts ? ` · scoped to ${user.contracts.join(", ")}` : " · all contracts"}
             </span>
             {isAdmin && data && (
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex flex-wrap items-center gap-2">
                 {["SCHEDULE_ACCESS.csv", "SCHEDULE_OCCUPANCY.csv", "RESULTS.csv"].map((f) => (
                   <a
                     key={f}
-                    href={`${API_BASE}/api/download/${data.scenario}/${f}`}
+                    href={`${API_BASE}/api/download/${data.scenario}/${f}?run_id=${data.run_id}`}
                     className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-sky-300 ring-1 ring-slate-800 rounded-lg px-2 py-1"
                   >
                     <Download className="h-3 w-3" /> {f.replace(".csv", "")}
@@ -894,7 +927,7 @@ export default function App() {
               No scheduled possessions in scope.
             </div>
           ) : (
-            <div ref={scrollerRef} className="overflow-x-auto flex gap-4 py-2 scrollbar-thin">
+            <div ref={scrollerRef} role="region" aria-label="Scheduled possessions" tabIndex={0} className="relative max-h-[60vh] overflow-y-auto overflow-x-hidden flex flex-col gap-3 p-2 scrollbar-thin">
               {tasks.map((t) => (
                 <TaskCard key={t.key} task={t} onOpen={setSelected} registerRef={registerRef} />
               ))}

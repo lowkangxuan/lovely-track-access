@@ -5,7 +5,7 @@
 html { color-scheme: dark; }
 body { margin: 0; -webkit-font-smoothing: antialiased; }
 
-/* thin, unobtrusive scrollbars for the horizontal card rail */
+/* thin, unobtrusive scrollbars for the scrollable timeline and possession list */
 .scrollbar-thin { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
 .scrollbar-thin::-webkit-scrollbar { height: 8px; width: 8px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }

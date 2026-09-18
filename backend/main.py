@@ -20,12 +20,15 @@ import csv
 import io
 import pathlib
 import time
+import uuid
+from threading import Lock
 from datetime import date
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from solver import (
     OUTPUT_HEADERS,
@@ -60,6 +63,8 @@ app.add_middleware(
 
 # in-memory store of the most recent solve per scenario, for CSV download
 _LAST_RUN: Dict[str, dict] = {}
+_RUNS: Dict[str, tuple[str, dict]] = {}
+_RUN_LOCK = Lock()
 
 
 # --------------------------------------------------------------------------- #
@@ -190,12 +195,19 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
     }
 
 
-def _store_run(out: SolveOutput) -> None:
-    _LAST_RUN[out.scenario] = {
+def _store_run(out: SolveOutput) -> str:
+    run = {
         "SCHEDULE_ACCESS.csv": [r.model_dump() for r in out.schedule_access],
         "SCHEDULE_OCCUPANCY.csv": [r.model_dump() for r in out.schedule_occupancy],
         "RESULTS.csv": [r.model_dump() for r in out.results],
     }
+    run_id = uuid.uuid4().hex
+    with _RUN_LOCK:
+        _LAST_RUN[out.scenario] = run
+        _RUNS[run_id] = (out.scenario, run)
+        while len(_RUNS) > 100:
+            del _RUNS[next(iter(_RUNS))]
+    return run_id
 
 
 # --------------------------------------------------------------------------- #
@@ -221,14 +233,18 @@ def schemas() -> dict:
 @app.get("/api/schedule")
 def default_schedule(scenario: str = "A") -> dict:
     """Baseline run against the bundled reference instance — what the app boots with."""
+    scenario = scenario.strip().upper()
+    if scenario not in SCENARIOS:
+        raise HTTPException(status_code=400, detail="scenario must be A, B or C")
     try:
         data = load_instance_from_dir(str(DATA_DIR))
     except CsvSchemaError as exc:
         raise HTTPException(status_code=503, detail=f"Bundled instance unavailable: {exc}")
     started = time.perf_counter()
     out = solve_scenario(scenario, data)
-    _store_run(out)
+    run_id = _store_run(out)
     vm = build_view_model(data, out)
+    vm["run_id"] = run_id
     vm["runtime_ms"] = round((time.perf_counter() - started) * 1000, 1)
     vm["source"] = "bundled-reference-instance"
     return vm
@@ -277,6 +293,8 @@ async def reschedule(
             if match is None:
                 continue
             name = match
+        if name in payload:
+            raise HTTPException(status_code=422, detail={"message": f"Duplicate instance file: {name}"})
         payload[name] = await upload.read()
 
     missing = [n for n in REQUIRED_HEADERS if n not in payload]
@@ -299,23 +317,26 @@ async def reschedule(
 
     started = time.perf_counter()
     try:
-        out = solve_scenario(scenario, data)
+        out = await run_in_threadpool(solve_scenario, scenario, data)
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail={"message": f"Solver failed: {exc}"})
 
-    _store_run(out)
+    run_id = _store_run(out)
     vm = build_view_model(data, out)
+    vm["run_id"] = run_id
     vm["runtime_ms"] = round((time.perf_counter() - started) * 1000, 1)
     vm["source"] = "uploaded-instance"
     return vm
 
 
 @app.get("/api/download/{scenario}/{filename}")
-def download(scenario: str, filename: str) -> StreamingResponse:
+def download(scenario: str, filename: str, run_id: Optional[str] = None) -> StreamingResponse:
     scenario = scenario.upper()
     if filename not in OUTPUT_HEADERS:
         raise HTTPException(status_code=404, detail=f"Unknown output file '{filename}'")
-    run = _LAST_RUN.get(scenario)
+    with _RUN_LOCK:
+        saved = _RUNS.get(run_id) if run_id else None
+        run = (saved[1] if saved and saved[0] == scenario else None) if run_id else _LAST_RUN.get(scenario)
     if not run:
         raise HTTPException(status_code=404, detail=f"No run stored for scenario {scenario}")
 

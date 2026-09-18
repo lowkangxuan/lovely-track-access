@@ -22,15 +22,16 @@ from __future__ import annotations
 from typing import Callable, Dict
 
 from .baseline import solve_baseline
+from .policies import solve_a, solve_b, solve_c
 from .schemas import InstanceData, SolveOutput
 
 Solver = Callable[[str, InstanceData], SolveOutput]
 
 _REGISTRY: Dict[str, Solver] = {
     "*": solve_baseline,
-    # "A": strict_supply_solver,
-    # "B": strict_schedule_solver,
-    # "C": elastic_solver,
+    "A": solve_a,
+    "B": solve_b,
+    "C": solve_c,
 }
 
 
