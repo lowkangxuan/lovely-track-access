@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html { color-scheme: dark; }
+body { margin: 0; -webkit-font-smoothing: antialiased; }
+
+/* thin, unobtrusive scrollbars for the horizontal card rail */
+.scrollbar-thin { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+.scrollbar-thin::-webkit-scrollbar { height: 8px; width: 8px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #475569; }
