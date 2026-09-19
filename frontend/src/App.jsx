@@ -19,12 +19,12 @@ import {
   Moon,
   RefreshCw,
   Shield,
-  TrainFront,
   UserRound,
   X,
 } from "lucide-react";
 
 import EditorView from "./EditorView.jsx";
+import { LogoMark } from "./Logo.jsx";
 import { loadDraft, saveDraft } from "./draft-store.js";
 import Metric from "./Metric.jsx";
 import TrackMap from "./TrackMap.jsx";
@@ -130,14 +130,16 @@ function Login({ onLogin, apiOnline }) {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-4">
       <div className="w-full max-w-md">
-        <div className="flex items-center gap-3 mb-8">
-          <div className="h-11 w-11 rounded-xl bg-sky-500/15 ring-1 ring-sky-400/30 grid place-items-center">
-            <TrainFront className="h-6 w-6 text-sky-300" />
-          </div>
-          <div>
-            <h1 className="text-lg font-semibold tracking-tight">Track Access Scheduler</h1>
-            <p className="text-xs text-slate-400">Line Alpha · Line Beta — possession planning</p>
-          </div>
+        <div className="mb-8 flex flex-col items-center text-center">
+          <LogoMark className="h-16 w-16" />
+          <h1 className="mt-4 text-2xl font-semibold tracking-tight">
+            <span className="text-sky-300">L</span>ovely{" "}
+            <span className="text-sky-300">T</span>rack{" "}
+            <span className="text-sky-300">A</span>ccess
+          </h1>
+          <p className="mt-1.5 text-xs text-slate-400">
+            Track possession scheduling · Line Alpha · Line Beta
+          </p>
         </div>
 
         <form onSubmit={submit} className="rounded-2xl bg-slate-900/70 ring-1 ring-slate-800 p-6 space-y-4">
@@ -221,7 +223,7 @@ function weatherByWeek(weather, horizon) {
   return byWeek;
 }
 
-function TimelineStrip({ tasks, horizon, weather, activeWeek, onPickWeek }) {
+function TimelineStrip({ tasks, horizon, weather, activeWeek, onPickWeek, weatherVisible = false }) {
   const buckets = useMemo(() => {
     const weeks = new Map();
     let max = horizon?.weeks ?? 30;
@@ -238,7 +240,20 @@ function TimelineStrip({ tasks, horizon, weather, activeWeek, onPickWeek }) {
     return [...weeks.values()];
   }, [tasks, horizon]);
   const days = useMemo(() => weatherByWeek(weather, horizon), [weather, horizon]);
-  const showWeather = days.size > 0;
+  // Outlook glyphs are only for the days this user actually has access nights on.
+  const relevantDates = useMemo(() => new Set(tasks.map((t) => t.date)), [tasks]);
+  // Hidden entirely for admins, and whenever the schedule was not solved weather-aware.
+  const showWeather = weatherVisible && days.size > 0;
+  const outlookFor = useCallback(
+    (week) => (showWeather ? (days.get(week) ?? []).filter((d) => relevantDates.has(d.date)) : []),
+    [showWeather, days, relevantDates],
+  );
+  // Size the columns to the busiest week so the bars stay aligned.
+  const glyphCols = useMemo(
+    () => (showWeather ? Math.max(0, ...buckets.map((b) => outlookFor(b.week).length)) : 0),
+    [showWeather, buckets, outlookFor],
+  );
+  const colWidth = glyphCols > 0 ? Math.max(18, glyphCols * 9 + 6) : 18;
 
   const peak = Math.max(1, ...buckets.map((b) => b.count));
 
@@ -251,18 +266,19 @@ function TimelineStrip({ tasks, horizon, weather, activeWeek, onPickWeek }) {
           : b.delayed ? "bg-rose-400/80"
           : b.eclo ? "bg-amber-400/80"
           : "bg-sky-400/80";
-        const outlook = days.get(b.week) ?? [];
+        const outlook = outlookFor(b.week);
         const severe = outlook.filter((d) => d.severe).length;
         return (
           <button
             key={b.week}
             onClick={() => onPickWeek(b.week)}
             title={`Week ${b.week}${b.date ? ` · ${fmtShort(b.date)}` : ""} — ${b.count} access-night${b.count === 1 ? "" : "s"}${b.eclo ? `, ${b.eclo} ECLO` : ""}${severe ? ` · ${severe} severe weather day${severe === 1 ? "" : "s"}` : ""}`}
-            className={`group shrink-0 ${showWeather ? "w-[58px]" : "w-[18px]"} flex flex-col items-center justify-end gap-1 rounded-md px-0.5 py-1 transition-colors ${
+            style={{ width: colWidth }}
+            className={`group shrink-0 flex flex-col items-center justify-end gap-1 rounded-md px-0.5 py-1 transition-colors ${
               isActive ? "bg-slate-800 ring-1 ring-sky-500/50" : "hover:bg-slate-800/60"
             }`}
           >
-            {showWeather && (
+            {glyphCols > 0 && (
               <span className="flex items-center gap-px h-2.5" aria-label={`Week ${b.week} weather`}>
                 {outlook.map((d) => {
                   const glyph = WEATHER_GLYPHS[d.condition] ?? WEATHER_GLYPHS.sun;
@@ -653,11 +669,16 @@ export default function App() {
       {/* ---------- header ---------- */}
       <header className="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-800">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 py-3 flex items-center gap-3">
-          <div className="h-9 w-9 rounded-lg bg-sky-500/15 ring-1 ring-sky-400/30 grid place-items-center shrink-0">
-            <TrainFront className="h-5 w-5 text-sky-300" />
-          </div>
+          <LogoMark className="h-9 w-9 shrink-0" />
           <div className="min-w-0">
-            <h1 className="text-sm font-semibold tracking-tight leading-tight">Track Access Scheduler</h1>
+            <h1 className="text-sm font-semibold tracking-tight leading-tight">
+              <span className="text-sky-300">L</span>ovely{" "}
+              <span className="text-sky-300">T</span>rack{" "}
+              <span className="text-sky-300">A</span>ccess
+              <span className="ml-2 align-middle rounded px-1.5 py-0.5 text-[10px] font-mono font-medium tracking-wider bg-sky-500/15 text-sky-300 ring-1 ring-sky-400/30">
+                LTA
+              </span>
+            </h1>
             <p className="text-[11px] text-slate-500 truncate">
               {data ? `${data.scenario_label} · horizon from ${fmtShort(data.horizon?.start)} · ${data.horizon?.weeks} weeks${data.weather_enabled ? " · weather-aware" : ""}` : "Line Alpha · Line Beta"}
             </p>
@@ -706,7 +727,7 @@ export default function App() {
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-sky-400/80" /> on target</span>
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-amber-400/80" /> ECLO</span>
                 <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-rose-400/80" /> overrun</span>
-                {data?.weather?.days?.length > 0 && (
+                {!isAdmin && data?.weather_enabled && data?.weather?.days?.length > 0 && (
                   <>
                     <span className="text-slate-700">|</span>
                     {Object.entries(WEATHER_GLYPHS).map(([key, { icon: Icon, tone, label }]) => (
@@ -719,7 +740,7 @@ export default function App() {
                 )}
               </div>
             </div>
-            <TimelineStrip tasks={visibleTasks} horizon={data?.horizon} weather={data?.weather} activeWeek={activeWeek} onPickWeek={jumpToWeek} />
+            <TimelineStrip tasks={visibleTasks} horizon={data?.horizon} weather={data?.weather} activeWeek={activeWeek} onPickWeek={jumpToWeek} weatherVisible={!isAdmin && !!data?.weather_enabled} />
           </div>
         </div>
       </header>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Lovely Track Access">
+  <defs>
+    <linearGradient id="lta-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="45%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="48" height="48" rx="13" fill="url(#lta-bg)"/>
+  <path d="M0 13A13 13 0 0 1 13 0h22L0 35Z" fill="#ffffff" opacity="0.14"/>
+  <g stroke="#041022" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M9.5 13.5V28.5H16"/>
+    <path d="M18 13.5H27.5M22.75 13.5V28.5"/>
+    <path d="M29.5 28.5L34 13.5L38.5 28.5M31 23.5H37"/>
+  </g>
+  <g stroke="#041022" stroke-linecap="round" fill="none">
+    <path d="M14.8 35.6H33.2" stroke-width="1.5" opacity="0.5"/>
+    <path d="M11.4 38.9H36.6" stroke-width="1.9" opacity="0.72"/>
+    <path d="M8 42.2H40" stroke-width="2.3" opacity="0.92"/>
+    <path d="M17.6 33.8L8 43" stroke-width="2.6"/>
+    <path d="M30.4 33.8L40 43" stroke-width="2.6"/>
+  </g>
+</svg>
