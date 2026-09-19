@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -12,11 +12,14 @@ import {
   Play,
   RefreshCw,
   Rocket,
+  Route,
   Upload,
+  Users,
   XCircle,
 } from "lucide-react";
 
 import Metric from "./Metric.jsx";
+import TeamAllocationsModal from "./TeamAllocations.jsx";
 import { matchSchemaName, validateHeaders } from "./schedule-utils.js";
 
 /* ------------------------------------------------------------------ *
@@ -62,7 +65,7 @@ async function inspect(name, file, schemas) {
 
 /* ---- one row in the CSV column ----------------------------------- */
 
-function FileSlot({ name, required, entry, onFile }) {
+function FileSlot({ name, required, entry, onFile, onClear, optional = false }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const pick = (files) => { const file = files?.[0]; if (file) onFile(file); };
@@ -84,7 +87,10 @@ function FileSlot({ name, required, entry, onFile }) {
           <div className="flex items-center gap-3">
             <Upload className="h-4 w-4 text-slate-500 shrink-0" />
             <div className="min-w-0 flex-1">
-              <div className="font-mono text-xs text-slate-200">{name}</div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs text-slate-200">{name}</span>
+                {optional && <span className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider bg-slate-800 text-slate-400 ring-1 ring-slate-700">Optional</span>}
+              </div>
               <div className="text-[10px] text-slate-500 truncate" title={required.join(", ")}>Drop here or click to upload · {required.length} columns</div>
             </div>
           </div>
@@ -104,7 +110,10 @@ function FileSlot({ name, required, entry, onFile }) {
           {entry.ok ? "Uploaded" : "Invalid"}
         </span>
         <div className="min-w-0 flex-1">
-          <div className="font-mono text-xs text-slate-200">{name}</div>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs text-slate-200">{name}</span>
+            {optional && <span className="rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider bg-slate-800 text-slate-400 ring-1 ring-slate-700">Optional</span>}
+          </div>
           <div className="text-[10px] text-slate-500 truncate">
             {entry.file.name}{entry.ok ? ` · ${entry.rowCount} row${entry.rowCount === 1 ? "" : "s"}` : ""}
           </div>
@@ -112,6 +121,11 @@ function FileSlot({ name, required, entry, onFile }) {
         <button type="button" onClick={() => inputRef.current?.click()} className={`${button} !py-1.5 shrink-0`}>
           <RefreshCw className="h-3 w-3" /> Update file
         </button>
+        {optional && onClear && (
+          <button type="button" onClick={onClear} aria-label={`Remove ${name}`} className={`${button} !px-2 !py-1.5 shrink-0`}>
+            <XCircle className="h-3 w-3" />
+          </button>
+        )}
       </div>
       {!entry.ok && (
         <p className="mt-2 flex items-start gap-1.5 text-[11px] text-rose-200">
@@ -128,6 +142,10 @@ function FileSlot({ name, required, entry, onFile }) {
 function Evaluation({ preview }) {
   const ev = preview.evaluation ?? {};
   const violations = preview.hard_violations ?? [];
+  const alloc = preview.allocation ?? {};
+  // null (rather than 0) whenever no 09_FLEET_DATA.csv rode along with the solve
+  const avgDistance = alloc.avg_travel_distance ?? preview.avg_travel_distance ?? null;
+  const matchRate = alloc.expertise_match_rate ?? preview.expertise_match_rate ?? null;
   return (
     <div className="space-y-4">
       <div className={`rounded-xl px-4 py-3 flex items-center gap-3 ring-1 ${
@@ -159,6 +177,24 @@ function Evaluation({ preview }) {
         <Metric icon={Moon} label="ECLO nights" value={ev.eclo_nights_total ?? "—"} tone={ev.eclo_nights_total ? "text-amber-300" : ""} />
         <Metric icon={Gauge} label="Combined objective score" value={ev.objective_score ?? "—"}
           description={preview.feasible ? "Lower is better" : "Not scored — infeasible"} tone={preview.feasible ? "text-sky-300" : "text-slate-400"} />
+
+        {/* --- manpower allocation KPIs (09_FLEET_DATA.csv) --- */}
+        <Metric icon={Route} label="Average travel distance"
+          value={avgDistance != null ? `${avgDistance.toFixed(1)} km` : "—"}
+          title="Mean straight-line distance from each assigned crew's base to its worksite centroid."
+          tone={avgDistance != null ? "text-sky-300" : "text-slate-400"}
+          description={avgDistance != null
+            ? `${alloc.teams_utilised ?? 0} of ${alloc.teams_total ?? 0} teams · ${alloc.total_travel_distance ?? 0} km total`
+            : "Upload 09_FLEET_DATA.csv"} />
+        <Metric icon={Users} label="Expertise match rate"
+          value={matchRate != null ? `${matchRate.toFixed(1)}%` : "—"}
+          title="Share of assignments where the crew meets both the required specialty and the required tier."
+          tone={matchRate == null ? "text-slate-400" : matchRate >= 100 ? "text-emerald-300" : "text-amber-300"}
+          description={matchRate != null
+            ? (alloc.unmatched_expertise
+                ? `${alloc.unmatched_expertise} below required tier`
+                : `All ${alloc.activities_allocated ?? 0} worksites fully matched`)
+            : "Upload 09_FLEET_DATA.csv"} />
       </div>
 
       {ev.excess_access_nights_total > 0 && (
@@ -185,8 +221,12 @@ function Evaluation({ preview }) {
  * `draft` = { entries, scenario } lifted to App so reopening the editor keeps the uploads.
  * `onImplement(preview)` must resolve once the schedule is active (it may throw to surface an error here).
  */
-export default function EditorView({ schemas, apiBase, draft, onDraftChange, onBack, onImplement }) {
-  const schemaNames = Object.keys(schemas);
+export default function EditorView({ schemas, optionalSchemas = {}, apiBase, draft, onDraftChange, onBack, onImplement }) {
+  const schemaNames = useMemo(() => Object.keys(schemas), [schemas]);
+  const optionalNames = useMemo(() => Object.keys(optionalSchemas), [optionalSchemas]);
+  // one registry for uploads and validation; only `schemaNames` gates Preview
+  const allSchemas = useMemo(() => ({ ...schemas, ...optionalSchemas }), [schemas, optionalSchemas]);
+  const allNames = useMemo(() => [...schemaNames, ...optionalNames], [schemaNames, optionalNames]);
   const [entries, setEntries] = useState(draft?.entries ?? {});
   const [scenario, setScenario] = useState(draft?.scenario ?? null);
   const [weatherAware, setWeatherAware] = useState(!!draft?.weatherAware); // default OFF
@@ -194,35 +234,44 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
   const [previewing, setPreviewing] = useState(false);
   const [implementing, setImplementing] = useState(false);
   const [error, setError] = useState("");
+  const [showAllocations, setShowAllocations] = useState(false);
   const bulkRef = useRef(null);
 
   useEffect(() => { onDraftChange?.({ entries, scenario, weatherAware }); }, [entries, scenario, weatherAware, onDraftChange]);
   useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && !previewing && !implementing && onBack();
+    // Escape closes the allocations modal first; the dialog's own onCancel does that.
+    const onKey = (e) => e.key === "Escape" && !previewing && !implementing && !showAllocations && onBack();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onBack, previewing, implementing]);
+  }, [onBack, previewing, implementing, showAllocations]);
 
   const setFile = useCallback(async (name, file) => {
-    const entry = await inspect(name, file, schemas);
+    const entry = await inspect(name, file, allSchemas);
     setEntries((prev) => ({ ...prev, [name]: entry }));
     setPreview(null); // inputs changed — the previous evaluation no longer applies
-  }, [schemas]);
+  }, [allSchemas]);
+
+  const clearFile = useCallback((name) => {
+    setEntries((prev) => { const { [name]: _drop, ...rest } = prev; return rest; });
+    setPreview(null);
+  }, []);
 
   /** Route a batch of files to their slots by filename; report the strays. */
   const addMany = useCallback(async (fileList) => {
     const strays = [];
     for (const file of Array.from(fileList || [])) {
-      const name = matchSchemaName(file.name, schemaNames);
+      const name = matchSchemaName(file.name, allNames);
       if (name) await setFile(name, file);
       else strays.push(file.name);
     }
-    setError(strays.length ? `Not one of the 8 instance files: ${strays.join(", ")}` : "");
-  }, [schemaNames, setFile]);
+    setError(strays.length ? `Not one of the recognised instance files: ${strays.join(", ")}` : "");
+  }, [allNames, setFile]);
 
   const validCount = schemaNames.filter((n) => entries[n]?.ok).length;
   const allValid = validCount === schemaNames.length;
   const canPreview = allValid && !!scenario && !previewing && !implementing;
+  const fleetEntries = optionalNames.filter((n) => entries[n]?.ok);
+  const hasAllocations = (preview?.allocation?.team_allocations?.length ?? 0) > 0;
 
   const runPreview = async () => {
     setPreviewing(true);
@@ -232,6 +281,8 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
       form.append("scenario", scenario);
       form.append("weather_enabled", weatherAware ? "true" : "false"); // read by POST /api/reschedule
       schemaNames.forEach((n) => form.append("files", entries[n].file, n));
+      // optional extras (09_FLEET_DATA.csv) ride along under the same `files` field
+      fleetEntries.forEach((n) => form.append("files", entries[n].file, n));
       const res = await fetch(`${apiBase}/api/reschedule`, { method: "POST", body: form });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -265,7 +316,7 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
 
   const panel = "flex flex-col min-h-0 rounded-2xl bg-slate-900/60 ring-1 ring-slate-800";
   const panelHead = "px-5 py-3 border-b border-slate-800 flex items-center gap-2";
-  const panelFoot = "px-5 py-3 border-t border-slate-800 flex items-center gap-3";
+  const panelFoot = "px-5 py-3 border-t border-slate-800 flex flex-wrap items-center gap-3";
 
   return (
     <div className="fixed inset-0 z-40 bg-slate-950 text-slate-100 flex flex-col">
@@ -279,7 +330,7 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
             <h1 className="text-sm font-semibold tracking-tight leading-tight">Editor's View</h1>
             <p className="text-[11px] text-slate-500 truncate">Upload instance CSVs, choose a scenario, preview the solve, then implement it as the active schedule.</p>
           </div>
-          <span className="ml-auto text-[11px] text-slate-500">{validCount} / {schemaNames.length} files valid{scenario ? ` · Scenario ${scenario}` : ""}{weatherAware ? " · weather-aware" : ""}</span>
+          <span className="ml-auto text-[11px] text-slate-500">{validCount} / {schemaNames.length} files valid{fleetEntries.length ? ` · +${fleetEntries.length} optional` : ""}{scenario ? ` · Scenario ${scenario}` : ""}{weatherAware ? " · weather-aware" : ""}</span>
         </div>
       </header>
 
@@ -304,6 +355,24 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
                 <FileSlot key={name} name={name} required={schemas[name]} entry={entries[name]} onFile={(file) => setFile(name, file)} />
               ))}
             </ul>
+
+            {optionalNames.length > 0 && (
+              <div>
+                <h3 className="text-[11px] uppercase tracking-wider text-slate-400 mb-2 flex items-center gap-2">
+                  <Users className="h-3 w-3" /> Fleet &amp; manpower
+                  <span className="normal-case tracking-normal text-slate-500">· optional, does not block preview</span>
+                </h3>
+                <ul className="space-y-2">
+                  {optionalNames.map((name) => (
+                    <FileSlot key={name} name={name} required={optionalSchemas[name]} entry={entries[name]}
+                      optional onFile={(file) => setFile(name, file)} onClear={() => clearFile(name)} />
+                  ))}
+                </ul>
+                <p className="mt-2 text-[10px] text-slate-500">
+                  Supplying fleet data enables travel-distance and expertise-match scoring, and the team allocation review.
+                </p>
+              </div>
+            )}
 
             {/* weather-aware toggle — leaning right, between uploads and scenarios */}
             <div className="flex justify-end">
@@ -396,9 +465,22 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
           </div>
 
           <div className={panelFoot}>
-            <p className="text-[11px] text-slate-500 flex-1">
+            <p className="text-[11px] text-slate-500 flex-1 min-w-[140px]">
               {preview ? (preview.feasible ? "Implementing replaces the active schedule and returns to the dashboard." : "This preview is infeasible — implement only if you accept the violations.") : "Evaluate a preview to enable."}
             </p>
+            <button type="button" disabled={!preview || previewing || implementing} onClick={() => setShowAllocations(true)}
+              title={hasAllocations
+                ? "Inspect the crew assigned to every scheduled worksite"
+                : "No fleet data in this run — upload 09_FLEET_DATA.csv to populate allocations"}
+              className={`rounded-lg px-4 py-2 text-sm font-medium flex items-center gap-2 ring-1 transition-colors ${
+                preview && !previewing && !implementing
+                  ? "ring-sky-500/40 text-sky-300 bg-sky-500/5 hover:bg-sky-500/15"
+                  : "ring-slate-800 text-slate-500 cursor-not-allowed"}`}>
+              <Users className="h-4 w-4" /> Review Team Allocations
+              {hasAllocations && (
+                <span className="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] tabular-nums">{preview.allocation.team_allocations.length}</span>
+              )}
+            </button>
             <button type="button" disabled={!preview || previewing || implementing} onClick={implement}
               className={`rounded-lg px-4 py-2 text-sm font-medium flex items-center gap-2 transition-colors ${
                 preview && !previewing && !implementing ? "bg-emerald-500 hover:bg-emerald-400 text-slate-950" : "bg-slate-800 text-slate-500 cursor-not-allowed"}`}>
@@ -407,6 +489,11 @@ export default function EditorView({ schemas, apiBase, draft, onDraftChange, onB
           </div>
         </section>
       </div>
+
+      {showAllocations && preview && (
+        <TeamAllocationsModal allocation={preview.allocation} scenario={preview.scenario}
+          onClose={() => setShowAllocations(false)} />
+      )}
     </div>
   );
 }

@@ -39,6 +39,8 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from solver import (
+    ALL_HEADERS,
+    OPTIONAL_HEADERS,
     OUTPUT_HEADERS,
     REQUIRED_HEADERS,
     SCENARIOS,
@@ -46,6 +48,7 @@ from solver import (
     CsvSchemaError,
     InstanceData,
     SolveOutput,
+    allocate_teams,
     load_instance_from_dir,
     parse_instance,
     registered,
@@ -183,6 +186,19 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
 
     tasks.sort(key=lambda t: (t["week"], t["contract_number"], t["activity_id"], t["access_seq"]))
 
+    # --- crew allocation over the activities the solver actually placed ----- #
+    scheduled = {
+        activity_id: {
+            "access_nights": len(rows),
+            "first_week": min(r.week for r in rows),
+            "last_week": max(r.week for r in rows),
+            "locations": plans[activity_id].path if activity_id in plans else [],
+        }
+        for activity_id, rows in accesses_by_activity.items()
+        if activity_id in acts
+    }
+    allocation = allocate_teams(data, net, scheduled)
+
     return {
         "scenario": out.scenario,
         "scenario_label": SCENARIOS.get(out.scenario, out.scenario),
@@ -199,9 +215,18 @@ def build_view_model(data: InstanceData, out: SolveOutput) -> dict:
             "eclo_nights_total": out.soft_scores.eclo_nights_total,
             "excess_access_nights_total": out.soft_scores.excess_access_nights_total,
             "objective_score": out.soft_scores.objective_score,
+            # manpower KPIs — null when no 09_FLEET_DATA.csv was supplied
+            "avg_travel_distance": allocation["avg_travel_distance"],
+            "expertise_match_rate": allocation["expertise_match_rate"],
         },
         "detail": out.detail,
         "tasks": tasks,
+        # --- distance tracking & manpower allocation ------------------------ #
+        "allocation": allocation,
+        "avg_travel_distance": allocation["avg_travel_distance"],
+        "expertise_match_rate": allocation["expertise_match_rate"],
+        "team_allocations": allocation["team_allocations"],
+        "fleet_supplied": bool(data.fleet),
         "network": {
             "lines": [line.model_dump() for line in data.lines],
             "stations": [station.model_dump() for station in data.stations],
@@ -334,7 +359,13 @@ def health() -> dict:
 
 @app.get("/api/schemas")
 def schemas() -> dict:
-    return {"instance": REQUIRED_HEADERS, "output": OUTPUT_HEADERS, "scenarios": SCENARIOS}
+    return {
+        "instance": REQUIRED_HEADERS,
+        # optional extras the UI renders as non-blocking upload slots
+        "optional": OPTIONAL_HEADERS,
+        "output": OUTPUT_HEADERS,
+        "scenarios": SCENARIOS,
+    }
 
 
 def _bundled_instance() -> InstanceData:
@@ -405,6 +436,7 @@ async def reschedule(
     parameters: Optional[UploadFile] = File(default=None),
     project_details: Optional[UploadFile] = File(default=None),
     activity_details: Optional[UploadFile] = File(default=None),
+    fleet_data: Optional[UploadFile] = File(default=None),  # optional 09_FLEET_DATA.csv
 ) -> dict:
     scenario = (scenario or "A").strip().upper()
     if scenario not in SCENARIOS:
@@ -422,6 +454,7 @@ async def reschedule(
             parameters,
             project_details,
             activity_details,
+            fleet_data,
         )
         if f is not None
     ]
@@ -429,15 +462,21 @@ async def reschedule(
     payload: Dict[str, bytes] = {}
     for upload in uploads:
         name = pathlib.Path(upload.filename or "").name
-        if name not in REQUIRED_HEADERS:
+        if name not in ALL_HEADERS:
             # tolerate prefixed/suffixed names, e.g. "instance_08_ACTIVITY_DETAILS.csv"
-            match = next((k for k in REQUIRED_HEADERS if name.upper().endswith(k.upper())), None)
+            match = next((k for k in ALL_HEADERS if name.upper().endswith(k.upper())), None)
             if match is None:
                 continue
             name = match
         if name in payload:
             raise HTTPException(status_code=422, detail={"message": f"Duplicate instance file: {name}"})
         payload[name] = await upload.read()
+
+    # A client that posts the fleet under its own field name need not get the
+    # filename right — the field itself says which file this is.
+    if fleet_data is not None and "09_FLEET_DATA.csv" not in payload:
+        await fleet_data.seek(0)
+        payload["09_FLEET_DATA.csv"] = await fleet_data.read()
 
     missing = [n for n in REQUIRED_HEADERS if n not in payload]
     if missing:

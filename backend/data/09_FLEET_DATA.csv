@@ -1,0 +1,21 @@
+team_id,base_station_id,coord_x,coord_y,activity_type_specialty,expertise_tier
+TEAM_ALPHA_1,S01,0.0,0.0,Renewal,Tier 1
+TEAM_ALPHA_2,S03,5.0,0.0,Renewal,Tier 2
+TEAM_ALPHA_3,H01,10.0,2.0,Renewal,Tier 1
+TEAM_ALPHA_4,S06,17.5,0.0,Renewal,Tier 2
+TEAM_ALPHA_5,S08,22.5,0.0,Renewal,Tier 3
+TEAM_BRAVO_1,S02,2.5,0.0,Construction,Tier 1
+TEAM_BRAVO_2,S04,7.5,0.0,Construction,Tier 2
+TEAM_BRAVO_3,H02,12.5,2.0,Construction,Tier 1
+TEAM_BRAVO_4,S07,20.0,0.0,Construction,Tier 3
+TEAM_CHARLIE_1,S11,0.0,4.0,Renewal,Tier 1
+TEAM_CHARLIE_2,S13,5.0,4.0,Renewal,Tier 2
+TEAM_CHARLIE_3,S15,15.0,4.0,Renewal,Tier 2
+TEAM_CHARLIE_4,S17,20.0,4.0,Renewal,Tier 3
+TEAM_DELTA_1,S12,2.5,4.0,Construction,Tier 1
+TEAM_DELTA_2,S14,7.5,4.0,Construction,Tier 2
+TEAM_DELTA_3,S16,17.5,4.0,Construction,Tier 2
+TEAM_DELTA_4,S18,22.5,4.0,Construction,Tier 3
+TEAM_ECHO_1,H01,10.0,2.0,Live,Tier 1
+TEAM_ECHO_2,H02,12.5,2.0,Live,Tier 1
+TEAM_ECHO_3,S05,15.0,0.0,Live,Tier 2

@@ -69,6 +69,23 @@ REQUIRED_HEADERS: Dict[str, List[str]] = {
     ],
 }
 
+#: Instance files the scheduler will use when supplied but never demands.
+#: Kept apart from REQUIRED_HEADERS so an instance without them still solves —
+#: the UI renders these as optional upload slots and Preview stays enabled.
+OPTIONAL_HEADERS: Dict[str, List[str]] = {
+    "09_FLEET_DATA.csv": [
+        "team_id",
+        "base_station_id",
+        "coord_x",
+        "coord_y",
+        "activity_type_specialty",
+        "expertise_tier",
+    ],
+}
+
+#: Every file the loader recognises, required or not.
+ALL_HEADERS: Dict[str, List[str]] = {**REQUIRED_HEADERS, **OPTIONAL_HEADERS}
+
 OUTPUT_HEADERS: Dict[str, List[str]] = {
     "SCHEDULE_ACCESS.csv": ["activity_id", "access_seq", "week", "eclo", "access_night"],
     "SCHEDULE_OCCUPANCY.csv": ["activity_id", "week", "location_id", "co_share_group"],
@@ -153,6 +170,21 @@ class Activity(BaseModel):
     activity_priority: int = 2
 
 
+class FleetTeam(BaseModel):
+    """One engineering crew from 09_FLEET_DATA.csv.
+
+    `coord_x`/`coord_y` are optional: a team with neither is placed on its
+    `base_station_id` using the reconstructed network geometry.
+    """
+
+    team_id: str
+    base_station_id: str = ""
+    coord_x: Optional[float] = None
+    coord_y: Optional[float] = None
+    activity_type_specialty: str = ""
+    expertise_tier: str = ""
+
+
 class Parameters(BaseModel):
     horizon_start: date
     horizon_weeks: int = 30
@@ -170,6 +202,8 @@ class InstanceData(BaseModel):
     parameters: Parameters
     contracts: List[Contract]
     activities: List[Activity]
+    # Optional 09_FLEET_DATA.csv — drives crew allocation, never the solve itself.
+    fleet: List[FleetTeam] = Field(default_factory=list)
     # Set by the API when weather-aware scheduling is on; None keeps supply as uploaded.
     weather: Optional[WeatherOutlook] = None
 
@@ -185,6 +219,9 @@ class InstanceData(BaseModel):
 
     def buffer_map(self) -> Dict[str, BufferRule]:
         return {b.nature_of_works.strip().lower(): b for b in self.buffers}
+
+    def fleet_map(self) -> Dict[str, FleetTeam]:
+        return {t.team_id: t for t in self.fleet}
 
 
 # --------------------------------------------------------------------------- #

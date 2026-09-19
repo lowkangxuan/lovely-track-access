@@ -15,10 +15,13 @@ from datetime import date, datetime
 from typing import Dict, List, Optional, Sequence
 
 from .schemas import (
+    ALL_HEADERS,
+    OPTIONAL_HEADERS,
     REQUIRED_HEADERS,
     Activity,
     BufferRule,
     Contract,
+    FleetTeam,
     InstanceData,
     Line,
     LocationSupply,
@@ -91,6 +94,14 @@ def _opt(row: dict, key: str) -> Optional[str]:
     return v or None
 
 
+def _of(row: dict, key: str) -> Optional[float]:
+    """A number that is allowed to be blank — blank means 'not supplied'."""
+    v = _s(row, key)
+    if not v:
+        return None
+    return _f(row, key)
+
+
 # --------------------------------------------------------------------------- #
 # header validation                                                            #
 # --------------------------------------------------------------------------- #
@@ -109,13 +120,13 @@ def read_rows(name: str, raw: bytes | str) -> List[dict]:
         if None in r or any(v is None for v in r.values()):
             raise CsvSchemaError(f"{name} row {reader.line_num}: incorrect number of fields")
         clean = {(k or "").strip(): v for k, v in r.items()}
-        identifier = REQUIRED_HEADERS[name][0]
+        identifier = ALL_HEADERS[name][0]
         if not _s(clean, identifier):
             raise CsvSchemaError(f"{name} row {reader.line_num}: missing {identifier}")
         numeric = {"seq", "is_interchange", "is_shared", "supply_capacity", "up_to_buffer_sectors",
                    "opposite_bound_required", "contract_priority", "number_of_workfronts",
                    "number_of_maximum_access_per_week", "total_accesses", "activity_priority"}
-        for key in numeric.intersection(REQUIRED_HEADERS[name]):
+        for key in numeric.intersection(ALL_HEADERS[name]):
             if not _s(clean, key):
                 raise CsvSchemaError(f"{name} row {reader.line_num}: missing {key}")
         rows.append(clean)
@@ -123,9 +134,10 @@ def read_rows(name: str, raw: bytes | str) -> List[dict]:
 
 
 def validate_headers(name: str, headers: Sequence[str]) -> None:
-    required = REQUIRED_HEADERS.get(name)
+    required = ALL_HEADERS.get(name)
     if required is None:
-        raise CsvSchemaError(f"{name} is not one of the 8 expected instance files.")
+        known = ", ".join(ALL_HEADERS)
+        raise CsvSchemaError(f"{name} is not one of the expected instance files ({known}).")
     missing = [h for h in required if h not in headers]
     if missing:
         raise CsvSchemaError(
@@ -141,7 +153,9 @@ def validate_headers(name: str, headers: Sequence[str]) -> None:
 
 def parse_instance(files: Dict[str, bytes | str]) -> InstanceData:
     """
-    files: {"01_LINES.csv": <bytes>, ...} — all 8 keys required.
+    files: {"01_LINES.csv": <bytes>, ...} — the 8 REQUIRED_HEADERS keys are
+    mandatory; anything in OPTIONAL_HEADERS (09_FLEET_DATA.csv) is used when
+    present and ignored when absent.
     """
     missing = [n for n in REQUIRED_HEADERS if n not in files]
     if missing:
@@ -253,6 +267,8 @@ def parse_instance(files: Dict[str, bytes | str]) -> InstanceData:
         if _s(r, "activity_id")
     ]
 
+    fleet = parse_fleet(files.get("09_FLEET_DATA.csv"))
+
     instance = InstanceData(
         lines=lines,
         stations=stations,
@@ -262,9 +278,28 @@ def parse_instance(files: Dict[str, bytes | str]) -> InstanceData:
         parameters=parameters,
         contracts=contracts,
         activities=activities,
+        fleet=fleet,
     )
     validate_instance(instance)
     return instance
+
+
+def parse_fleet(raw: bytes | str | None) -> List[FleetTeam]:
+    """09_FLEET_DATA.csv -> teams. `None` (file not supplied) yields an empty fleet."""
+    if raw is None:
+        return []
+    return [
+        FleetTeam(
+            team_id=_s(r, "team_id"),
+            base_station_id=_s(r, "base_station_id"),
+            coord_x=_of(r, "coord_x"),
+            coord_y=_of(r, "coord_y"),
+            activity_type_specialty=_s(r, "activity_type_specialty"),
+            expertise_tier=_s(r, "expertise_tier"),
+        )
+        for r in read_rows("09_FLEET_DATA.csv", raw)
+        if _s(r, "team_id")
+    ]
 
 
 def load_instance_from_dir(directory: str) -> InstanceData:
@@ -278,6 +313,10 @@ def load_instance_from_dir(directory: str) -> InstanceData:
         if not p.exists():
             raise CsvSchemaError(f"Bundled instance is missing {name} in {directory}")
         files[name] = p.read_bytes()
+    for name in OPTIONAL_HEADERS:
+        p = base / name
+        if p.exists():
+            files[name] = p.read_bytes()
     return parse_instance(files)
 
 
@@ -297,6 +336,7 @@ def validate_instance(data: InstanceData) -> None:
     unique([(s.line_code, s.seq) for s in data.stations], "station sequence per line")
     unique([s.sector_id for s in data.sectors], "sector_id")
     unique([b.nature_of_works.lower().strip() for b in data.buffers], "buffer rule")
+    unique([t.team_id for t in data.fleet], "team_id")
     if not all((data.lines, data.stations, data.sectors, data.supply, data.buffers, data.contracts, data.activities)):
         raise CsvSchemaError("Instance tables must not be empty")
     if data.parameters.horizon_weeks < 1:
@@ -347,6 +387,16 @@ def validate_instance(data: InstanceData) -> None:
         missing = set(net.expand_path(a.start_location_id, a.end_location_id)) - net.known_locations
         if missing:
             raise CsvSchemaError(f"{a.activity_id}: missing supply for {sorted(missing)}")
+    # 09_FLEET_DATA.csv is optional, but a team that is present must be placeable:
+    # it needs either explicit coordinates or a base station the network knows.
+    known_stations = {s.station_id for s in data.stations}
+    for t in data.fleet:
+        has_coords = t.coord_x is not None and t.coord_y is not None
+        if not has_coords and t.base_station_id not in known_stations:
+            raise CsvSchemaError(
+                f"{t.team_id}: base_station_id '{t.base_station_id}' is not a known station "
+                f"and no coord_x/coord_y were supplied"
+            )
     try:
         topological_order(data)
     except ValueError as exc:

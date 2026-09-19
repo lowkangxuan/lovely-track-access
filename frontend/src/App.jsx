@@ -78,6 +78,14 @@ const FALLBACK_HEADERS = {
   ],
 };
 
+/** Optional instance files — uploaded when available, never required to preview. */
+const FALLBACK_OPTIONAL_HEADERS = {
+  "09_FLEET_DATA.csv": [
+    "team_id", "base_station_id", "coord_x", "coord_y",
+    "activity_type_specialty", "expertise_tier",
+  ],
+};
+
 /* ------------------------------------------------------------------ *
  * Helpers                                                            *
  * ------------------------------------------------------------------ */
@@ -489,6 +497,7 @@ function ActivityModal({ task, network, onClose }) {
 export default function App() {
   const [user, setUser] = useState(null);
   const [schemas, setSchemas] = useState(FALLBACK_HEADERS);
+  const [optionalSchemas, setOptionalSchemas] = useState(FALLBACK_OPTIONAL_HEADERS);
   const [apiOnline, setApiOnline] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -519,7 +528,12 @@ export default function App() {
         const res = await fetch(`${API_BASE}/api/schemas`);
         if (!res.ok) throw new Error();
         const body = await res.json();
-        if (!cancelled) { setSchemas(body.instance || FALLBACK_HEADERS); setApiOnline(true); }
+        if (!cancelled) {
+          setSchemas(body.instance || FALLBACK_HEADERS);
+          // a backend that predates the fleet registry simply reports none
+          setOptionalSchemas(body.optional ?? {});
+          setApiOnline(true);
+        }
       } catch {
         if (!cancelled) setApiOnline(false);
       }
@@ -801,6 +815,7 @@ export default function App() {
       {page === "editor" && isAdmin && (
         <EditorView
           schemas={schemas}
+          optionalSchemas={optionalSchemas}
           apiBase={API_BASE}
           draft={editorDraft}
           onDraftChange={setEditorDraft}
