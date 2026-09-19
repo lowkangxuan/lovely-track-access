@@ -15,7 +15,7 @@ frontend/    React + Tailwind + lucide-react dashboard
 
 ## Quick start
 
-**Demo**: https://nebula-x-1003639741182.asia-southeast1.run.app/
+**Demo**: https://lovely-track-access-1003639741182.asia-southeast1.run.app/
 
 ## Local Setup
 **Backend** (port 8000)

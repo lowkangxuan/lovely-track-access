@@ -9,6 +9,9 @@ connection. **Route A below uses only the browser**, which is what you want when
 you are signed in with a hackathon-issued Google account that has no access to
 your own GitHub repo.
 
+Throughout: the Cloud Run service is named **`lovely-track-access`** and the
+upload bundle is **`lovely-track-access-deploy.zip`**.
+
 ---
 
 ## Route A — Cloud Shell (no local installs, no GitHub)
@@ -20,16 +23,25 @@ as whichever account you are signed in with, and it ships with `gcloud` and
 1. Sign in to <https://console.cloud.google.com> with the hackathon credential
    and select the hackathon project in the project picker.
 2. Click the **Activate Cloud Shell** icon (`>_`) in the top-right toolbar.
-3. In the Cloud Shell toolbar: **⋮ → Upload → File**, and pick
-   `nebula-x-deploy.zip` from this repo's root (124 KB — source only, no
-   `node_modules`, no `.venv`).
-4. In the shell:
+3. Upload `lovely-track-access-deploy.zip` from this repo's root (~350 KB,
+   source only — no `node_modules`, no `.venv`):
+   - **Terminal view:** `⋮` **More** → **Upload**.
+   - **Editor view:** right-click your home folder in the **Explorer** panel →
+     **Upload Files**.
+
+   Uploads always land in your home directory; that is a Cloud Shell rule, not
+   a permissions problem.
+4. In the terminal:
 
    ```bash
-   mkdir -p nebula-x && unzip -o nebula-x-deploy.zip -d nebula-x && cd nebula-x
+   rm -rf ~/lovely-track-access
+   unzip ~/lovely-track-access-deploy.zip -d ~/lovely-track-access
+   cd ~/lovely-track-access
+
    gcloud config set project <HACKATHON_PROJECT_ID>
    gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
-   gcloud run deploy nebula-x \
+
+   gcloud run deploy lovely-track-access \
      --source . \
      --region asia-southeast1 \
      --allow-unauthenticated \
@@ -38,30 +50,58 @@ as whichever account you are signed in with, and it ships with `gcloud` and
      --min-instances 1 --max-instances 1
    ```
 
+   There is no GUI "extract" in Cloud Shell — `unzip` is a command you type.
    `--source .` uploads the directory to Cloud Build, which builds the
    `Dockerfile` and pushes the image to Artifact Registry for you. Answer `y` if
    it offers to create the `cloud-run-source-deploy` repository.
 
-5. The command prints a URL like `https://nebula-x-<hash>-as.a.run.app`.
+5. The command prints a URL like
+   `https://lovely-track-access-<hash>-as.a.run.app`.
 
-To redeploy after a change: re-upload the zip (or edit in place with the Cloud
-Shell editor) and run the same `gcloud run deploy` command again.
+### Redeploying after a change
 
-### If the hackathon account is missing a role
+Settings already on the service persist, so the redeploy is the short form:
 
-`gcloud run deploy --source` needs Cloud Run Admin, Cloud Build Editor,
-Artifact Registry Writer, Storage Admin, and Service Account User on the
-Compute default service account. Hackathon projects usually grant Editor or
-Owner, which covers all of it. If a step fails with a `PERMISSION_DENIED`, the
-message names the exact role — ask the organisers for that one rather than
-guessing.
+```bash
+cd ~/lovely-track-access
+gcloud run deploy lovely-track-access --source . --region asia-southeast1
+```
+
+If the change was made on your laptop rather than in the Cloud Shell editor,
+rebuild the bundle (see the last section), then:
+
+```bash
+rm -f ~/lovely-track-access-deploy.zip     # BEFORE re-uploading
+# ...upload the new zip...
+rm -rf ~/lovely-track-access
+unzip ~/lovely-track-access-deploy.zip -d ~/lovely-track-access
+cd ~/lovely-track-access
+gcloud run deploy lovely-track-access --source . --region asia-southeast1
+```
+
+That first `rm -f` matters: if a zip of the same name is already in your home
+directory, the upload lands as `lovely-track-access-deploy (1).zip` and you will
+redeploy the old code without noticing.
+
+**Budget five minutes per deploy.** Each `--source` build runs on a fresh Cloud
+Build worker with no layer cache, and the OR-Tools wheel is most of that. Do not
+save a change for ten minutes before judging.
+
+### If you already deployed under the old `nebula-x` name
+
+That service is still running, still public, and still billing for a warm
+instance. Delete it so there is only one URL in play:
+
+```bash
+gcloud run services delete nebula-x --region asia-southeast1
+```
 
 ---
 
 ## Route B — gcloud CLI on your own machine
 
-Same command as step 4, run from this repo's root instead of Cloud Shell.
-Requires the gcloud SDK installed, then:
+Same commands as Route A step 4, run from this repo's root instead of Cloud
+Shell. Requires the gcloud SDK installed, then:
 
 ```bash
 gcloud auth login          # sign in with the hackathon credential
@@ -75,10 +115,9 @@ Still no Docker needed — the build happens in Cloud Build either way.
 ## Route C — continuous deployment from GitHub
 
 Only viable if the account you deploy with can reach the repo. Cloud Run →
-Deploy container → **Continuously deploy from a repository** → connect
-`lowkangxuan/nebula-x`, branch `^main$`, build type **Dockerfile**. Every push
-to `main` then redeploys. Worth switching to after the hackathon if the project
-survives.
+Deploy container → **Continuously deploy from a repository** → connect the
+repo, branch `^main$`, build type **Dockerfile**. Every push to `main` then
+redeploys. Worth switching to after the hackathon if the project survives.
 
 ---
 
@@ -116,6 +155,15 @@ weather cache survive restarts of the *process* but not replacement of the
 active schedule persists for the life of the demo. For durable state, write
 that file to a GCS bucket instead.
 
+### If the hackathon account is missing a role
+
+`gcloud run deploy --source` needs Cloud Run Admin, Cloud Build Editor,
+Artifact Registry Writer, Storage Admin, and Service Account User on the
+Compute default service account. Hackathon projects usually grant Editor or
+Owner, which covers all of it. If a step fails with `PERMISSION_DENIED`, the
+message names the exact role — ask the organisers for that one rather than
+guessing.
+
 ---
 
 ## Check it worked
@@ -145,11 +193,11 @@ renders and a CSV download works.
 
 ## Regenerating the upload bundle
 
-`nebula-x-deploy.zip` is gitignored and goes stale as soon as you edit source.
-Rebuild it from the repo root:
+`lovely-track-access-deploy.zip` is gitignored and goes stale as soon as you
+edit source. Rebuild it from the repo root:
 
 ```bash
-zip -r nebula-x-deploy.zip . \
+zip -r lovely-track-access-deploy.zip . \
   -x '*.git*' '*/.venv/*' '*/node_modules/*' '*/dist/*' '*/state/*' \
      '*/__pycache__/*' '*.pyc' '*.DS_Store' '*.zip'
 ```
