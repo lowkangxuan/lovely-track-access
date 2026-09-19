@@ -35,7 +35,10 @@ import { activityPriority, EMPTY_FILTERS, matches, occupancyOverlay } from "./sc
  * Configuration                                                      *
  * ------------------------------------------------------------------ */
 
-const API_BASE = import.meta.env?.VITE_API_BASE ?? "http://localhost:8000";
+// Empty = same origin. In production FastAPI serves this bundle itself; in dev
+// Vite proxies /api to uvicorn on :8000 (see vite.config.js).
+const API_BASE = import.meta.env?.VITE_API_BASE ?? "";
+const API_LABEL = API_BASE || "this origin";
 
 /** Hardcoded demo credentials + RBAC scope. */
 const USERS = {
@@ -186,7 +189,7 @@ function Login({ onLogin, apiOnline }) {
 
         <p className={`mt-4 text-[11px] flex items-center gap-1.5 ${apiOnline ? "text-emerald-400" : "text-amber-400"}`}>
           <span className={`h-1.5 w-1.5 rounded-full ${apiOnline ? "bg-emerald-400" : "bg-amber-400"}`} />
-          {apiOnline ? `Scheduler API reachable at ${API_BASE}` : `Scheduler API unreachable at ${API_BASE} — start the FastAPI backend`}
+          {apiOnline ? `Scheduler API reachable at ${API_LABEL}` : `Scheduler API unreachable at ${API_LABEL} — start the FastAPI backend`}
         </p>
       </div>
     </div>
@@ -567,7 +570,7 @@ export default function App() {
       setApiOnline(true);
     } catch (e) {
       setError(
-        `Could not reach the scheduler API at ${API_BASE}. Start it with "uvicorn main:app --port 8000" in the backend folder.`
+        `Could not reach the scheduler API at ${API_LABEL}. Start it with "uvicorn main:app --port 8000" in the backend folder.`
       );
       setApiOnline(false);
     } finally {

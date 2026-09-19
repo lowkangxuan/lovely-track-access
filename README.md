@@ -40,6 +40,11 @@ Open http://localhost:5173.
 The app boots against the reference instance bundled in `backend/data/`, so the
 dashboard is populated before anything is uploaded.
 
+In dev the UI calls `/api/*` on its own origin and Vite proxies those to
+uvicorn on 8000. In a container build the React bundle is copied to
+`backend/static` and FastAPI serves it, so one Cloud Run service covers both —
+see [DEPLOY.md](DEPLOY.md).
+
 ---
 
 ## API

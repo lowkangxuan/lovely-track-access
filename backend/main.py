@@ -18,6 +18,9 @@ GET  /api/download/{scenario}/{file}   SCHEDULE_ACCESS | SCHEDULE_OCCUPANCY | RE
 
 Weather-aware scheduling: see solver/weather.py. The active schedule and the
 weather cache live under STATE_DIR (backend/state) so they survive restarts.
+
+In a container build the React bundle is copied to backend/static and mounted at
+"/", so one service serves both the UI and the API. See DEPLOY.md.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import pathlib
 import time
 import uuid
@@ -35,6 +39,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -61,6 +66,8 @@ from weather_service import WeatherUnavailable, coordinates, fetch_outlook
 DATA_DIR = pathlib.Path(__file__).parent / "data"
 STATE_DIR = pathlib.Path(__file__).parent / "state"
 ACTIVE_FILE = STATE_DIR / "active_schedule.json"
+# the built React bundle, copied here by the Docker build (absent in local dev)
+STATIC_DIR = pathlib.Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Railway Track Access Scheduler",
@@ -528,10 +535,19 @@ def download(scenario: str, filename: str, run_id: Optional[str] = None) -> Stre
     )
 
 
+# --------------------------------------------------------------------------- #
+# static UI                                                                    #
+# --------------------------------------------------------------------------- #
+# Mounted last so every /api/* route above keeps priority over the catch-all.
+# In local dev the directory does not exist and Vite serves the UI on :5173.
+if STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
+
+
 _restore_active()
 
 
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
