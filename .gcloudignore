@@ -1,0 +1,20 @@
+# What `gcloud run deploy --source .` should NOT upload to Cloud Build.
+# Without this file gcloud falls back to .gitignore, which misses nothing
+# important here but does not exist inside an unzipped copy of the repo.
+.git
+.gitignore
+.claude
+**/.DS_Store
+**/__pycache__
+**/*.py[cod]
+backend/.venv
+backend/state
+backend/tests
+backend/requirements-dev.txt
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.env.*
+*.zip
+DEPLOY.md
+README.md

@@ -1,27 +1,88 @@
-# Deploying to Google Cloud Run
+# Deploying the Track Access Scheduler to Google Cloud Run
 
 One container, one service, one URL. The Docker build compiles the React bundle
 and FastAPI serves it, so the UI and the API share an origin — no CORS setup, no
 second hosting product, and `VITE_API_BASE` can stay unset.
 
-Cloud Build builds straight from GitHub, so you don't need Docker or the gcloud
-SDK on your laptop.
+Cloud Build does the building, so you need neither Docker nor a GitHub
+connection. **Route A below uses only the browser**, which is what you want when
+you are signed in with a hackathon-issued Google account that has no access to
+your own GitHub repo.
 
 ---
 
-## 1. One-time setup in the console
+## Route A — Cloud Shell (no local installs, no GitHub)
 
-**Prerequisites:** a Google Cloud project with billing enabled, and this repo
-pushed to `github.com/lowkangxuan/nebula-x` on `main`.
+Cloud Shell is a terminal inside the Cloud console. It is already authenticated
+as whichever account you are signed in with, and it ships with `gcloud` and
+`unzip`.
 
-1. Open **Cloud Run** → **Deploy container** → **Service**.
-2. Choose **Continuously deploy from a repository** → **Set up with Cloud Build**.
-3. Authenticate GitHub, pick the `lowkangxuan/nebula-x` repository.
-4. Branch: `^main$`. Build type: **Dockerfile**, source location `/Dockerfile`.
-5. Click **Save**. Accept the prompts to enable the Cloud Run, Cloud Build and
-   Artifact Registry APIs if you haven't already.
+1. Sign in to <https://console.cloud.google.com> with the hackathon credential
+   and select the hackathon project in the project picker.
+2. Click the **Activate Cloud Shell** icon (`>_`) in the top-right toolbar.
+3. In the Cloud Shell toolbar: **⋮ → Upload → File**, and pick
+   `nebula-x-deploy.zip` from this repo's root (124 KB — source only, no
+   `node_modules`, no `.venv`).
+4. In the shell:
 
-## 2. Service settings that matter
+   ```bash
+   mkdir -p nebula-x && unzip -o nebula-x-deploy.zip -d nebula-x && cd nebula-x
+   gcloud config set project <HACKATHON_PROJECT_ID>
+   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+   gcloud run deploy nebula-x \
+     --source . \
+     --region asia-southeast1 \
+     --allow-unauthenticated \
+     --memory 2Gi --cpu 2 \
+     --timeout 300 \
+     --min-instances 1 --max-instances 1
+   ```
+
+   `--source .` uploads the directory to Cloud Build, which builds the
+   `Dockerfile` and pushes the image to Artifact Registry for you. Answer `y` if
+   it offers to create the `cloud-run-source-deploy` repository.
+
+5. The command prints a URL like `https://nebula-x-<hash>-as.a.run.app`.
+
+To redeploy after a change: re-upload the zip (or edit in place with the Cloud
+Shell editor) and run the same `gcloud run deploy` command again.
+
+### If the hackathon account is missing a role
+
+`gcloud run deploy --source` needs Cloud Run Admin, Cloud Build Editor,
+Artifact Registry Writer, Storage Admin, and Service Account User on the
+Compute default service account. Hackathon projects usually grant Editor or
+Owner, which covers all of it. If a step fails with a `PERMISSION_DENIED`, the
+message names the exact role — ask the organisers for that one rather than
+guessing.
+
+---
+
+## Route B — gcloud CLI on your own machine
+
+Same command as step 4, run from this repo's root instead of Cloud Shell.
+Requires the gcloud SDK installed, then:
+
+```bash
+gcloud auth login          # sign in with the hackathon credential
+gcloud config set project <HACKATHON_PROJECT_ID>
+```
+
+Still no Docker needed — the build happens in Cloud Build either way.
+
+---
+
+## Route C — continuous deployment from GitHub
+
+Only viable if the account you deploy with can reach the repo. Cloud Run →
+Deploy container → **Continuously deploy from a repository** → connect
+`lowkangxuan/nebula-x`, branch `^main$`, build type **Dockerfile**. Every push
+to `main` then redeploys. Worth switching to after the hackathon if the project
+survives.
+
+---
+
+## Service settings that matter
 
 | Setting | Value | Why |
 | --- | --- | --- |
@@ -55,10 +116,9 @@ weather cache survive restarts of the *process* but not replacement of the
 active schedule persists for the life of the demo. For durable state, write
 that file to a GCS bucket instead.
 
-## 3. Deploy and check
+---
 
-Cloud Build runs on Save and again on every push to `main`. When it finishes
-you get a URL like `https://nebula-x-<hash>-as.a.run.app`.
+## Check it worked
 
 ```bash
 curl https://<your-url>/api/health          # solver registration per scenario
@@ -68,7 +128,7 @@ curl -I https://<your-url>/                 # 200, text/html — the React bundl
 Then open the URL, log in as `admin` / `admin123`, and confirm the timeline
 renders and a CSV download works.
 
-## 4. Known caveats
+## Known caveats
 
 - **The login is not authentication.** `USERS` in `frontend/src/App.jsx` is
   hardcoded client-side. A public URL means anyone can pick the admin role. Fine
@@ -76,27 +136,20 @@ renders and a CSV download works.
 - **Outbound weather calls.** Open-Meteo is reached over plain HTTPS egress,
   which Cloud Run allows by default. If you attach a VPC connector later you
   will also need Cloud NAT, or `/api/weather` starts returning 503.
-- **Python version.** The image pins `python:3.13-slim` to match your local
+- **Python version.** The image pins `python:3.13-slim` to match the local
   venv. If the OR-Tools wheel ever fails to resolve, drop the base image to
   `python:3.12-slim` — nothing in the codebase needs 3.13.
-- **Cost.** Min instances 1 means you are billed for an always-warm instance
-  (roughly a few dollars a month at this size). Set it back to 0 after judging,
-  accepting cold starts and a reset active schedule.
+- **Cost.** Min instances 1 means an always-warm instance is billed. On a
+  hackathon project with granted credits that is what you want during judging;
+  set it back to 0 afterwards.
 
-## Fallback: deploying from your laptop
+## Regenerating the upload bundle
 
-If you'd rather not connect GitHub, install the gcloud SDK and run from the
-repo root:
+`nebula-x-deploy.zip` is gitignored and goes stale as soon as you edit source.
+Rebuild it from the repo root:
 
 ```bash
-gcloud run deploy nebula-x \
-  --source . \
-  --region asia-southeast1 \
-  --allow-unauthenticated \
-  --memory 2Gi --cpu 2 \
-  --timeout 300 \
-  --min-instances 1 --max-instances 1
+zip -r nebula-x-deploy.zip . \
+  -x '*.git*' '*/.venv/*' '*/node_modules/*' '*/dist/*' '*/state/*' \
+     '*/__pycache__/*' '*.pyc' '*.DS_Store' '*.zip'
 ```
-
-`--source` uploads the repo and builds it with Cloud Build; you still don't
-need Docker locally.

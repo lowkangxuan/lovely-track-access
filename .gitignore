@@ -15,3 +15,6 @@ dist/
 
 # os
 .DS_Store
+
+# deploy bundles for Cloud Shell upload
+*.zip
