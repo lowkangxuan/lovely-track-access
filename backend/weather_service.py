@@ -16,12 +16,15 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
+
+import certifi
 
 from solver import WeatherOutlook, make_day
 
@@ -69,7 +72,11 @@ def _plan(start: date, end: date, today: date) -> Tuple[str, date, date, int]:
 def _http_get_json(url: str, params: Dict[str, object]) -> dict:
     query = urllib.parse.urlencode(params)
     req = urllib.request.Request(f"{url}?{query}", headers={"User-Agent": "track-access-scheduler/1.0"})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as res:
+    # Some Python installations have no default CA bundle. Add certifi's roots
+    # while retaining system/custom trust and certificate/hostname verification.
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS, context=context) as res:
         return json.loads(res.read().decode("utf-8"))
 
 
