@@ -15,6 +15,9 @@ frontend/    React + Tailwind + lucide-react dashboard
 
 ## Quick start
 
+**Demo**: https://nebula-x-1003639741182.asia-southeast1.run.app/
+
+## Local Setup
 **Backend** (port 8000)
 
 ```bash
@@ -33,12 +36,6 @@ npm run dev
 ```
 
 Open http://localhost:5173.
-
-| user    | password   | scope                        |
-| ------- | ---------- | ---------------------------- |
-| `admin` | `admin123` | every contract + Reschedule  |
-| `eng1`  | `pass123`  | contract `C001` only         |
-
 The app boots against the reference instance bundled in `backend/data/`, so the
 dashboard is populated before anything is uploaded.
 
@@ -46,6 +43,13 @@ In dev the UI calls `/api/*` on its own origin and Vite proxies those to
 uvicorn on 8000. In a container build the React bundle is copied to
 `backend/static` and FastAPI serves it, so one Cloud Run service covers both —
 see [DEPLOY.md](DEPLOY.md).
+
+## Login Credentials
+
+| user    | password   | scope                        |
+| ------- | ---------- | ---------------------------- |
+| `admin` | `admin123` | every contract + Reschedule  |
+| `eng1`  | `pass123`  | contract `C001` only         |
 
 ---
 
