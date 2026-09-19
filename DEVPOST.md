@@ -1,11 +1,6 @@
-# Railway Track Access Scheduler & Fleet Allocator
+# Lovely Track Access 💙
 
 **PS1 — Dual-Line Railway Track Access Optimisation (Line Alpha & Line Beta)**
-
-> 🌐 **Live app:** `<INSERT_LIVE_URL>`
-> 🎥 **3-minute demo:** `<INSERT_YOUTUBE_URL>`
-> 💻 **Source:** https://github.com/lowkangxuan/nebula-x
-> 📊 **Public test results:** `03_results/{A,B,C}/` — one full submission set per scenario
 
 ---
 
