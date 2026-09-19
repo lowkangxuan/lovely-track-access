@@ -44,6 +44,8 @@ uvicorn on 8000. In a container build the React bundle is copied to
 `backend/static` and FastAPI serves it, so one Cloud Run service covers both —
 see [DEPLOY.md](DEPLOY.md).
 
+Frontend checks: `cd frontend && npm test && npm run build`.
+
 ## Login Credentials
 
 | user    | password   | scope                        |
@@ -224,5 +226,3 @@ per-contract accounting index, independent of location). Consequences:
 
 Point the UI at a different backend with `VITE_API_BASE` (see
 `frontend/.env.example`).
-
-Frontend checks: `cd frontend && npm test && npm run build`.
