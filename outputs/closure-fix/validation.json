@@ -1,0 +1,106 @@
+{
+  "A": {
+    "feasible": true,
+    "activities": 54,
+    "violations": 0,
+    "scores": {
+      "scenario": "A",
+      "overrun_days_total": 28,
+      "contracts_overrunning": 3,
+      "earliness_days_total": 14,
+      "excess_access_nights_total": 0,
+      "eclo_nights_total": 0,
+      "priority_overrun": {
+        "1": 0,
+        "2": 0,
+        "3": 28
+      },
+      "priority_weighted_score": 32.2,
+      "objective_score": 32.2,
+      "formula_version": "ps1-2.5"
+    },
+    "search_status": "OPTIMAL",
+    "search_seconds": 0.867,
+    "overrunning_contracts": [
+      {
+        "scenario": "A",
+        "contract_number": "C006",
+        "simulated_completion_date": "2027-07-18",
+        "overrun_days": 14
+      },
+      {
+        "scenario": "A",
+        "contract_number": "C010",
+        "simulated_completion_date": "2027-05-23",
+        "overrun_days": 7
+      },
+      {
+        "scenario": "A",
+        "contract_number": "C014",
+        "simulated_completion_date": "2027-07-25",
+        "overrun_days": 7
+      }
+    ]
+  },
+  "B": {
+    "feasible": true,
+    "activities": 54,
+    "violations": 0,
+    "scores": {
+      "scenario": "B",
+      "overrun_days_total": 0,
+      "contracts_overrunning": 0,
+      "earliness_days_total": 14,
+      "excess_access_nights_total": 0,
+      "eclo_nights_total": 6,
+      "priority_overrun": {
+        "1": 0,
+        "2": 0,
+        "3": 0
+      },
+      "priority_weighted_score": 0.0,
+      "objective_score": 30.0,
+      "formula_version": "ps1-2.5"
+    },
+    "search_status": "OPTIMAL",
+    "search_seconds": 0.524,
+    "overrunning_contracts": []
+  },
+  "C": {
+    "feasible": true,
+    "activities": 54,
+    "violations": 0,
+    "scores": {
+      "scenario": "C",
+      "overrun_days_total": 14,
+      "contracts_overrunning": 2,
+      "earliness_days_total": 49,
+      "excess_access_nights_total": 0,
+      "eclo_nights_total": 2,
+      "priority_overrun": {
+        "1": 0,
+        "2": 0,
+        "3": 14
+      },
+      "priority_weighted_score": 16.1,
+      "objective_score": 26.1,
+      "formula_version": "ps1-2.5"
+    },
+    "search_status": "OPTIMAL",
+    "search_seconds": 1.139,
+    "overrunning_contracts": [
+      {
+        "scenario": "C",
+        "contract_number": "C006",
+        "simulated_completion_date": "2027-07-11",
+        "overrun_days": 7
+      },
+      {
+        "scenario": "C",
+        "contract_number": "C010",
+        "simulated_completion_date": "2027-05-23",
+        "overrun_days": 7
+      }
+    ]
+  }
+}

@@ -20,15 +20,15 @@ The Scheduler ingests the eight instance CSVs describing a planning horizon — 
 - **Scenario B — Strict Schedule, Flexible Supply.** Dates are immovable. Pay for them with extra access-nights and early-closure/late-opening.
 - **Scenario C — Elastic Trade-off.** Both flex, with a narrow one-excess-night-per-location-week allowance and a two-week ECLO continuity window per line.
 
-On the reference instance all three come back **feasible with the full workload placed — 54 of 54 activities, zero hard violations**, solved in well under a second each:
+On the reference instance all three come back **feasible with the full workload placed — 54 of 54 activities, zero hard violations**, under the corrected weekly closure rules:
 
 | Scenario | Feasible | Scheduled | Overrun days | ECLO | Excess nights | Objective |
 | --- | --- | --- | --- | --- | --- | --- |
-| A | ✅ | 54 / 54 | 21 (C006 +14, C010 +7) | 0 | 0 | **25.2** |
+| A | ✅ | 54 / 54 | 28 (C006 +14, C010 +7, C014 +7) | 0 | 0 | **32.2** |
 | B | ✅ | 54 / 54 | 0 | 6 | 0 | **30.0** |
-| C | ✅ | 54 / 54 | 21 (C006 +14, C010 +7) | 0 | 0 | **25.2** |
+| C | ✅ | 54 / 54 | 14 (C006 +7, C010 +7) | 2 | 0 | **26.1** |
 
-C converging on A is not a bug — it's the model telling us something. With overrun weighted at 1×/day for tier-3 contracts, neither an ECLO night (5) nor an excess access-night (7) buys enough schedule to pay for itself. The trade-off engine priced the levers and declined to use them.
+C uses two ECLO accesses to reduce overrun while preserving weekly closure separation. These results pass internal validation. Regression fixtures reproduce all 178 supplied external closure messages on the old exports; the external checker itself was not supplied.
 
 Around the solver sits a works-controller dashboard: a sticky week-by-week timeline, role-scoped views (an engineer on C001 sees only C001), a network schematic you click to filter by sector, a scenario rubric breakdown showing exactly which penalties produced the score, and a two-panel Editor's View where you upload an instance, preview the solve, inspect it, and only then implement it.
 
@@ -36,9 +36,9 @@ And a layer the brief didn't ask for: **crew allocation**. Drop in an optional n
 
 ## 🔧 How We Built It
 
-**Backend — FastAPI + OR-Tools CP-SAT.** The solver is a time-indexed constraint program over `(activity, week, possession-night)` booleans, seeded by a multi-start greedy construction. That pairing is deliberate. The greedy *always* finishes the full workload — extending the calendar under congestion rather than dropping work — so there is always a complete incumbent to fall back on. CP-SAT then minimises the scenario objective within the incumbent's horizon and reports its search status. If it can't improve inside the time limit, the seed ships with `detail.fallback_used = true`. **The tool never returns "infeasible" as an answer**, which is precisely what the non-negotiables demand.
+**Backend — FastAPI + OR-Tools CP-SAT.** The solver is a time-indexed constraint program over `(activity, week, possession-night)` booleans, seeded by a multi-start greedy construction. That pairing is deliberate. The greedy *always* finishes the full workload — extending the calendar under congestion rather than dropping work — so there is always a complete incumbent to fall back on. CP-SAT then minimises the scenario objective within the incumbent's horizon and reports its search status. If it can't improve inside the time limit, the seed ships with `detail.fallback_used = true`. When the instance cannot meet a hard deadline or supply requirement, the output explicitly reports infeasibility and cannot be activated.
 
-**The part we're most glad we built: an independent validator.** `solver/validation.py` re-checks every emitted schedule against all ten hard rules — workload conservation, planned start, predecessor FS+0, closures and buffers, legal possession mixes, co-sharing, weekly allocation, workfronts, ECLO, ECLO continuity — with no shared code path with the solver that produced it. A solver that believes its own output is a solver that ships breaches.
+**The part we're most glad we built: an independent validator.** `solver/validation.py` re-checks every emitted schedule against all ten hard rules — workload conservation, planned start, predecessor FS+0, closures and buffers, legal possession mixes, co-sharing, weekly allocation, workfronts, ECLO, ECLO continuity — independently of the search decisions, using the same network geometry. A solver that believes its own output is a solver that ships breaches.
 
 **The one seam.** `solver/registry.py` takes any callable of shape `solve(scenario, data) -> SolveOutput`. Registering a new solver changes nothing else — not the API contract, not the CSV writers, not a line of the UI. It let us swap the greedy baseline for CP-SAT mid-build with zero downstream churn, and it's how a future team swaps ours out.
 
@@ -64,7 +64,7 @@ And a layer the brief didn't ask for: **crew allocation**. Drop in an optional n
 
 ## 🏆 Accomplishments We're Proud Of
 
-**All three scenarios feasible, full workload, zero hard violations.** The mandatory gate is 100% workload delivery before any quality metric counts. We clear it on every scenario and re-prove it independently, on every run, with a validator that shares no code path with the solver that produced the schedule.
+**All three scenarios feasible, full workload, zero hard violations.** The mandatory gate is 100% workload delivery before any quality metric counts. We clear it on every scenario and re-prove it independently, on every run, with a validator that independently checks the emitted rows and shares the network geometry with the solver.
 
 **Designing the ninth file to be optional — on purpose.** Judges will upload a hidden instance containing *the eight standard CSVs*. Our fleet feature needs a ninth. So `09_FLEET_DATA.csv` lives in a separate optional registry: the eight required files still gate Preview, an instance without a fleet solves exactly as it did before, and the new metrics return `null` rather than a fabricated `0` — the UI says "Upload 09_FLEET_DATA.csv" instead of showing a confident zero. **A judge's hidden instance cannot break this build.** That constraint shaped the architecture rather than being patched around at the end.
 
@@ -84,7 +84,7 @@ And a layer the brief didn't ask for: **crew allocation**. Drop in an optional n
 
 ## 📚 What We Learnt
 
-**Write the checker before you trust the solver.** Building `validation.py` as a genuinely independent re-check — not shared helpers with the solver — repeatedly caught modelling drift that a self-consistent solver would have happily reported as feasible. The discipline of "two implementations must agree" found more real bugs than any amount of reading the code.
+**Write the checker before you trust the solver.** Building `validation.py` as a genuinely independent re-check — separate from search decisions, with regression cases for the shared geometry — repeatedly caught modelling drift that a self-consistent solver would have happily reported as feasible. The discipline of "two implementations must agree" found more real bugs than any amount of reading the code.
 
 **The specification's silences are design decisions in disguise.** The submission format can't express which two possessions at *different* locations fall on the same night. That's not a gap to paper over; it's a fork with real consequences for packing density. We documented our interpretation explicitly in the README, along with where to change it if the reference validator reads it differently. Naming your assumptions is cheaper than defending them later.
 

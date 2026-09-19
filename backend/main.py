@@ -61,6 +61,7 @@ from solver import (
 )
 from solver import WeatherOutlook, horizon_dates
 from solver.network import Network, build_activity_plans
+from solver.validation import VALIDATION_VERSION
 from weather_service import WeatherUnavailable, coordinates, fetch_outlook
 
 DATA_DIR = pathlib.Path(__file__).parent / "data"
@@ -284,6 +285,10 @@ def _restore_active() -> None:
         return
     try:
         saved = json.loads(ACTIVE_FILE.read_text(encoding="utf-8"))
+        # Preserve the old file, but do not restore feasibility claims made
+        # under obsolete closure rules. The instance must be previewed again.
+        if not isinstance(saved, dict) or saved.get("validation_version") != VALIDATION_VERSION:
+            return
         run_id = saved.pop("run_id")
         with _RUN_LOCK:
             _RUNS[run_id] = saved
@@ -314,7 +319,8 @@ def _store_run(out: SolveOutput, view: dict) -> str:
     view["run_id"] = run_id
     with _RUN_LOCK:
         _LAST_RUN[out.scenario] = csv_rows
-        _RUNS[run_id] = {"scenario": out.scenario, "csv": csv_rows, "view": view}
+        _RUNS[run_id] = {"scenario": out.scenario, "csv": csv_rows, "view": view,
+                         "validation_version": VALIDATION_VERSION}
         evictable = [k for k in _RUNS if k != _ACTIVE_RUN and k != run_id]
         while len(_RUNS) > _MAX_RUNS and evictable:
             del _RUNS[evictable.pop(0)]
@@ -412,6 +418,10 @@ def activate_schedule(body: ActivateRequest) -> dict:
         run = _RUNS.get(body.run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"Unknown or expired run_id '{body.run_id}'")
+        if run.get("validation_version") != VALIDATION_VERSION:
+            raise HTTPException(status_code=409, detail="Closure rules have changed. Preview this schedule again before implementing it.")
+        if not run["view"].get("feasible"):
+            raise HTTPException(status_code=409, detail="Resolve the schedule's hard violations before implementing it.")
         _ACTIVE_RUN = body.run_id
         _LAST_RUN[run["scenario"]] = run["csv"]
         _persist_active()

@@ -1,7 +1,7 @@
 """Read-only checks of emitted submissions, independent of search decisions.
 
-Our exports use one possession-night label across an activity's entire path.
-This also supplies a consistent physical-night witness for closure checks.
+Our exports use one possession label across an activity's entire path.
+Distinct labels never bypass weekly work/closure exclusions.
 """
 from collections import defaultdict
 from itertools import combinations
@@ -9,6 +9,8 @@ from itertools import combinations
 from .network import Calendar, Network, build_activity_plans
 from .schemas import Violation
 from .scoring import build_results
+
+VALIDATION_VERSION = "weekly-closures-v2"
 
 
 def validate_schedule(data, out):
@@ -69,7 +71,7 @@ def validate_schedule(data, out):
                 fail("occupancy", f"{aid} wk{r.week}: a consistent possession-night label is required")
             else:
                 group = next(iter(groups))
-                physical[r.week, group].append(aid)
+                physical[r.week].append((aid, group))
                 lk, pk = (*ck, r.access_night), (*ck, group)
                 if lk in local_to_physical and local_to_physical[lk] != group:
                     fail("workfront", f"{aid} wk{r.week}: one local night maps to multiple possession nights")
@@ -95,15 +97,30 @@ def validate_schedule(data, out):
     for (cn, typ, week, night), members in night_groups.items():
         if len(members) > contracts[cn].number_of_workfronts:
             fail("workfront", f"{cn}/{typ} wk{week} night {night}: workfront cap exceeded")
-    for (week, group), members in physical.items():
-        for a, b in combinations(members, 2):
-            pa, pb = plans[a], plans[b]
-            ta, tb = contracts[acts[a].contract_number].access_type, contracts[acts[b].contract_number].access_type
-            common_path = set(pa.path) & set(pb.path)
-            exempt = common_path and "PM" not in (ta, tb) and (ta, tb) != ("PC", "PC")
-            collision = set(pa.buffer_zone) & set(pb.buffer_zone)
-            if collision and not exempt:
-                fail("closure", f"wk{week} {group}: {a}/{b} intersect at {sorted(collision)}")
+    for week, members in sorted(physical.items()):
+        # A possession is a connected set of worked paths with the same label.
+        # An unrelated activity cannot join a closure merely by reusing a label.
+        labels = dict(members)
+        parent = {a: a for a in labels}
+
+        def root(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for a, b in combinations(sorted(labels), 2):
+            if labels[a] == labels[b] and set(plans[a].path) & set(plans[b].path):
+                parent[root(a)] = root(b)
+        possessions = defaultdict(set)
+        for a in sorted(labels):
+            possessions[root(a)].add(a)
+        for owners in possessions.values():
+            zone = {loc for a in owners for loc in plans[a].buffer_zone}
+            for a in sorted(labels.keys() - owners):
+                collision = sorted(set(plans[a].path) & zone)
+                if collision:
+                    fail("closure", f"wk{week}: {a} inside closure of {sorted(owners)[:3]} at {collision[:4]}")
     if out.scenario == "C":
         for line, weeks in windows.items():
             if max(weeks) - min(weeks) > 1:

@@ -173,8 +173,8 @@ class Network:
         """
         Exclusion zone around `path`.
 
-        * `buffer_sectors` tunnel sectors ahead and behind on the same bound
-          (plus the platforms in between).
+        * `buffer_sectors` tunnel sectors ahead and behind on the same bound.
+          Only Live closures also close the platforms bounding those sectors.
         * `mirror_opposite` (Live / 750V) mirrors the whole closure onto the
           opposite bound, and additionally crosses onto the *other line's*
           H01_H02 tunnel sector and H01/H02 platforms at the interchange.
@@ -198,16 +198,18 @@ class Network:
                 keys = self.sector_keys_by_line[ref.line]
                 for i in range(max(0, si - buffer_sectors), min(len(keys), si + buffer_sectors)):
                     footprint.add(f"SEC:{ref.line}:{keys[i]}:{ref.bound}")
-                    for station in keys[i].split("_"):
-                        footprint.add(f"PLAT:{ref.line}:{station}:{ref.bound}")
+                    if mirror_opposite:
+                        for station in keys[i].split("_"):
+                            footprint.add(f"PLAT:{ref.line}:{station}:{ref.bound}")
         if buffer_sectors > 0:
             for (line, bound), idxs in by_line_bound.items():
                 sec_keys = self.sector_keys_by_line.get(line, [])
                 lo, hi = min(idxs), max(idxs)
                 for i in range(max(0, lo - buffer_sectors), min(len(sec_keys) - 1, hi + buffer_sectors) + 1):
                     footprint.add(f"SEC:{line}:{sec_keys[i]}:{bound}")
-                    for station in sec_keys[i].split("_"):
-                        footprint.add(f"PLAT:{line}:{station}:{bound}")
+                    if mirror_opposite:
+                        for station in sec_keys[i].split("_"):
+                            footprint.add(f"PLAT:{line}:{station}:{bound}")
         footprint.update(path)
 
         if mirror_opposite:
@@ -222,7 +224,8 @@ class Network:
             footprint |= mirrored
 
             # 750V interchange crossover: closing the traction power at H01_H02
-            # closes the other line's H01_H02 tunnel and H01/H02 platforms too.
+            # closes and buffers the shared sector on every line and bound.
+            # Apply the buffer there too, rather than adding only the hub.
             touches_interchange = any(
                 (r := parse_location(l)) and r.kind == "SEC" and r.key == INTERCHANGE_SECTOR_KEY
                 for l in footprint
@@ -233,6 +236,16 @@ class Network:
                         footprint.add(f"SEC:{line}:{INTERCHANGE_SECTOR_KEY}:{bound}")
                         for hub in ("H01", "H02"):
                             footprint.add(f"PLAT:{line}:{hub}:{bound}")
+                        shared_zone = self.buffer_footprint(
+                            [f"SEC:{line}:{INTERCHANGE_SECTOR_KEY}:{bound}"],
+                            buffer_sectors, False,
+                        )
+                        footprint.update(shared_zone)
+                        for loc in shared_zone:
+                            ref = parse_location(loc)
+                            if ref and ref.kind == "SEC":
+                                for station in ref.key.split("_"):
+                                    footprint.add(f"PLAT:{line}:{station}:{bound}")
 
         return sorted(footprint)
 

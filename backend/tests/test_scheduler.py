@@ -1,6 +1,7 @@
 import csv
 from datetime import timedelta
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -66,15 +67,32 @@ class SolverTests(unittest.TestCase):
                 if scenario == "B":
                     self.assertEqual(out.soft_scores.overrun_days_total, 0)
 
-    def test_supply_tradeoff(self):
+    def test_extra_supply_does_not_bypass_pm_closures(self):
         data = small(3, "PM")
         data.contracts[0].planned_completion_date = Calendar(data.parameters.horizon_start, 30).sunday_of(1)
         a, b, c = [solve_scenario(s, data) for s in "ABC"]
-        self.assertTrue(all(o.feasible for o in (a, b, c)))
+        self.assertTrue(a.feasible)
+        self.assertTrue(c.feasible)
+        self.assertFalse(b.feasible)
+        self.assertIn("planned_date", {v.rule for v in b.hard_violations})
         self.assertEqual(max(r.week for r in a.schedule_access), 3)
-        self.assertEqual(max(r.week for r in b.schedule_access), 1)
-        self.assertGreater(b.soft_scores.excess_access_nights_total, 0)
-        self.assertGreaterEqual(max(r.week for r in c.schedule_access), 2)
+        for out in (a, b, c):
+            self.assertEqual(len({r.week for r in out.schedule_access}), 3)
+            self.assertNotIn("closure", {v.rule for v in out.hard_violations})
+
+    def test_supply_tradeoff_with_weather_outage(self):
+        data = small()
+        net = Network.build(data)
+        loc = next(loc for loc in net.supply if net.location_kind(loc) == "viaduct")
+        data.activities[0].start_location_id = data.activities[0].end_location_id = loc
+        data.contracts[0].planned_completion_date = Calendar(data.parameters.horizon_start, 30).sunday_of(1)
+        data.weather = synthetic_outlook(data, {1: 7})
+        a, b, c = [solve_scenario(s, data) for s in "ABC"]
+        self.assertTrue(all(o.feasible for o in (a, b, c)))
+        self.assertEqual(a.schedule_access[0].week, 2)
+        for out in (b, c):
+            self.assertEqual(out.schedule_access[0].week, 1)
+            self.assertGreater(out.soft_scores.excess_access_nights_total, 0)
 
     def test_co_share_packs_four_coworkers(self):
         data = small(4)
@@ -83,6 +101,30 @@ class SolverTests(unittest.TestCase):
         self.assertTrue(out.feasible)
         self.assertEqual({r.week for r in out.schedule_access}, {1})
         self.assertEqual(len({r.co_share_group for r in out.schedule_occupancy}), 1)
+
+    def test_overlapping_coworkers_must_share_one_group(self):
+        data = small(2)
+        for row in data.supply:
+            row.supply_capacity = 4
+        out = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, 2, 0)]})
+        self.assertIn("closure", {v.rule for v in out.hard_violations})
+        out = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, 1, 0)]})
+        self.assertTrue(out.feasible, out.hard_violations)
+
+    def test_buffer_only_overlap_does_not_block_work(self):
+        data = small(2, nature="Non-live (Consist)")
+        data.activities[1].start_location_id = data.activities[1].end_location_id = "SEC:ALP:S04_H01:EB"
+        for group in (1, 2):
+            out = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, group, 0)]})
+            self.assertTrue(out.feasible, out.hard_violations)
+
+    def test_connected_coshare_chain_is_one_possession(self):
+        data = small(3, nature="Live")
+        data.contracts[0].number_of_workfronts = 3
+        for activity, sector in zip(data.activities, ("S01_S02", "S02_S03", "S03_S04")):
+            activity.start_location_id = activity.end_location_id = f"SEC:ALP:{sector}:EB"
+        out = _output(data, STRICT_SUPPLY, {a.activity_id: [(1, 1, 0)] for a in data.activities})
+        self.assertTrue(out.feasible, out.hard_violations)
 
     def test_predecessor_and_fractional_workload(self):
         data = small(2)
@@ -140,13 +182,40 @@ class SolverTests(unittest.TestCase):
         normal = net.buffer_footprint(p.path, 1, False)
         self.assertFalse(any(":BET:" in loc for loc in normal))
 
-    def test_buffer_buffer_collision_and_separate_nights(self):
-        data = small(2, nature="Non-live (Consist)")
-        data.activities[1].start_location_id = data.activities[1].end_location_id = "SEC:ALP:S04_H01:EB"
-        bad = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, 1, 0)]})
-        self.assertIn("closure", {v.rule for v in bad.hard_violations})
-        good = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, 2, 0)]})
+    def test_buffer_collision_needs_a_different_week(self):
+        data = small(2, nature="Live")
+        data.activities[1].start_location_id = data.activities[1].end_location_id = "SEC:ALP:S03_S04:EB"
+        same_night = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, 1, 0)]})
+        self.assertIn("closure", {v.rule for v in same_night.hard_violations})
+        # A different possession night in the same week does NOT clear it: the
+        # closure holds for the week, and access_night is a per-contract index.
+        other_night = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(1, 2, 0)]})
+        self.assertIn("closure", {v.rule for v in other_night.hard_violations})
+        good = _output(data, STRICT_SUPPLY, {"T0": [(1, 1, 0)], "T1": [(2, 1, 0)]})
         self.assertTrue(good.feasible, good.hard_violations)
+
+    def test_buffer_ring_is_tunnel_sectors_only(self):
+        """`up_to_buffer_sectors` counts tunnels; a non-Live ring closes no extra platform."""
+        data = small(nature="Non-live (Consist)")
+        net = Network.build(data)
+        zone = net.buffer_footprint(["SEC:ALP:S03_S04:EB", "PLAT:ALP:S03:EB", "PLAT:ALP:S04:EB"], 1, False)
+        self.assertIn("SEC:ALP:S02_S03:EB", zone)
+        self.assertIn("SEC:ALP:S04_H01:EB", zone)
+        self.assertNotIn("PLAT:ALP:S02:EB", zone)
+        self.assertNotIn("PLAT:ALP:H01:EB", zone)
+
+    def test_live_crossover_carries_its_buffer_onto_the_other_line(self):
+        """Traction power dies across the interchange, taking the buffer span with it."""
+        data = small(nature="Live")
+        net = Network.build(data)
+        zone = net.buffer_footprint(
+            ["SEC:ALP:H01_H02:EB", "PLAT:ALP:H01:EB", "PLAT:ALP:H02:EB"], 2, True
+        )
+        self.assertIn("SEC:BET:S13_S14:WB", zone)
+        self.assertIn("PLAT:BET:S13:WB", zone)
+        self.assertIn("PLAT:BET:S16:EB", zone)
+        self.assertNotIn("SEC:BET:S12_S13:WB", zone)
+        self.assertNotIn("PLAT:BET:S17:EB", zone)
 
     def test_c_eclo_continuity_and_b_exemption(self):
         data = small()
@@ -222,6 +291,35 @@ class InputAndApiTests(unittest.TestCase):
     def tearDown(self):
         main.fetch_outlook = self._fetch
         self.tmp.cleanup()
+
+    def test_obsolete_saved_schedule_requires_a_new_preview(self):
+        main.ACTIVE_FILE.write_text("[]")
+        main._restore_active()
+        self.assertIsNone(main._ACTIVE_RUN)
+        saved = {"run_id": "old-closure-rules", "scenario": "A", "csv": {}, "view": {"feasible": True}}
+        main.ACTIVE_FILE.write_text(json.dumps(saved))
+        main._restore_active()
+        self.assertIsNone(main._ACTIVE_RUN)
+        self.assertTrue(main.ACTIVE_FILE.exists())
+        main._RUNS[saved["run_id"]] = saved
+        try:
+            response = self.client.post("/api/schedule/activate", json={"run_id": saved["run_id"]})
+            self.assertEqual(response.status_code, 409)
+            self.assertIsNone(main._ACTIVE_RUN)
+        finally:
+            main._RUNS.pop(saved["run_id"], None)
+
+    def test_infeasible_preview_cannot_be_activated(self):
+        main._RUNS["infeasible-preview"] = {
+            "scenario": "B", "csv": {}, "view": {"feasible": False},
+            "validation_version": main.VALIDATION_VERSION,
+        }
+        try:
+            response = self.client.post("/api/schedule/activate", json={"run_id": "infeasible-preview"})
+            self.assertEqual(response.status_code, 409)
+            self.assertIsNone(main._ACTIVE_RUN)
+        finally:
+            main._RUNS.pop("infeasible-preview", None)
 
     def test_invalid_numbers_duplicates_and_cycles(self):
         bad = self.files.copy()

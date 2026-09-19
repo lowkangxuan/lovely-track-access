@@ -1,7 +1,7 @@
 """Time-indexed CP-SAT scheduling with a complete-workload greedy incumbent.
 
-Placements are (week, possession night, ECLO). Possession labels are consistent
-across locations; exported access_night values are local contract/type indices.
+Placements are (week, possession group, ECLO). Group labels are consistent
+across locations; they do not exempt separate groups from weekly closures.
 No cap on schedule slip is imposed on the constructive fallback. CP-SAT refines
 its finite horizon and night palette, and reports its bounded search status.
 """
@@ -15,7 +15,7 @@ from ortools.sat.python import cp_model
 from .network import Calendar, Network, build_activity_plans, topological_order
 from .schemas import AccessRow, OccupancyRow, SolveOutput, SoftScores
 from .scoring import build_results, compute_soft_scores
-from .validation import validate_schedule
+from .validation import VALIDATION_VERSION, validate_schedule
 
 
 def can_share(a, b, plans, contracts):
@@ -27,10 +27,12 @@ def can_share(a, b, plans, contracts):
 
 
 def conflict_pairs(plans, contracts):
+    """Weekly work/closure overlaps, including pairs that could co-share."""
     pairs = []
     for a, b in combinations(plans, 2):
         pa, pb = plans[a], plans[b]
-        if set(pa.buffer_zone) & set(pb.buffer_zone) and not can_share(a, b, plans, contracts):
+        if (set(pa.path) & set(pb.buffer_zone)
+                or set(pb.path) & set(pa.buffer_zone)):
             pairs.append((a, b))
     return pairs
 
@@ -46,6 +48,7 @@ def _greedy(data, policy, plans, net, cal, mode):
                      else c.contract_priority * 1000 + p.earliest_week if mode == 1
                      else due * 100 + p.earliest_week)
     conflicts = {frozenset(pair) for pair in conflict_pairs(plans, contracts)}
+    shareable = {pair for pair in conflicts if can_share(*pair, plans, contracts)}
     placed, bookings, windows = {}, defaultdict(list), {}
     location_slots = defaultdict(set)
     contract_slots = defaultdict(lambda: defaultdict(list))
@@ -66,10 +69,14 @@ def _greedy(data, policy, plans, net, cal, mode):
         while remaining > 1e-9:
             # At most one new night per activity is ever necessary in a week.
             occupied_slots = [s for (w, s) in bookings if w == week]
+            weekly_bookings = [(b, s) for (w, s), members in bookings.items()
+                               if w == week for b in members]
             selected = None
             for slot in range(1, max(occupied_slots, default=0) + 2):
                 others = bookings[week, slot]
-                if any(frozenset((aid, b)) in conflicts for b in others):
+                if any(pair in conflicts and (s != slot or pair not in shareable)
+                       for b, s in weekly_bookings
+                       for pair in [frozenset((aid, b))]):
                     continue
                 book = contract_slots[a.contract_number, a.activity_type, week]
                 if len(book.get(slot, [])) >= c.number_of_workfronts:
@@ -140,6 +147,7 @@ def _output(data, policy, placements, detail=None):
                   "capacity_hotspots": hotspots, "nights_scheduled": len(access),
                   "eclo_nights": out.soft_scores.eclo_nights_total,
                   "activities_scheduled": len(placements), "activities_total": len(data.activities),
+                  "validation_version": VALIDATION_VERSION,
                   "validation": "internal; official validator not supplied", **(detail or {})}
     return out
 
@@ -221,8 +229,14 @@ def optimize(data, policy):
     for a, b in conflict_pairs(plans, contracts):
         for w in range(1, horizon + 1):
             if (a, w) in active and (b, w) in active:
-                for s in range(1, slots + 1):
-                    model.add(x[a, w, s] + x[b, w, s] <= 1)
+                if can_share(a, b, plans, contracts):
+                    # Overlapping work may run in the same week only as one
+                    # legal possession. Different labels are not a time escape.
+                    for s in range(1, slots + 1):
+                        model.add(x[a, w, s] == x[b, w, s]).only_enforce_if(
+                            [active[a, w], active[b, w]])
+                else:
+                    model.add(active[a, w] + active[b, w] <= 1)
     location_used = defaultdict(list)
     for (loc, w, s), entries in at_location.items():
         used = model.new_bool_var(f"loc_{loc}_{w}_{s}")

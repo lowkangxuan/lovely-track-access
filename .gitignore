@@ -18,3 +18,4 @@ dist/
 
 # deploy bundles for Cloud Shell upload
 *.zip
+!backend/tests/fixtures/closure_reports/scenario_*.zip

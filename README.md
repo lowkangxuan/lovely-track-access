@@ -100,7 +100,7 @@ solver/
   network.py     location-id grammar, path expansion, buffer footprints, week maths
   policies.py    the A / B / C rule sets (excess cap, ECLO, deadline, continuity)
   optimizer.py   CP-SAT solver seeded by a multi-start greedy  <- registered for A, B, C
-  baseline.py    the original greedy solver, still the "*" fallback
+  baseline.py    closure-safe constructive scheduler, still the "*" fallback
   validation.py  read-only hard-rule checker run on every emitted schedule
   scoring.py     soft scores + the §2.5 combined objective
   registry.py    solve_scenario() dispatch  <- register here
@@ -126,7 +126,8 @@ contract tier and 1.3/1.2/1.0 by activity tier, 7 per excess access-night, 5
 per ECLO night. `B` drops the overrun term (dates are hard there).
 
 `baseline.py` remains registered as `"*"` and is only used if a scenario is
-deregistered.
+deregistered. It uses the same corrected constructive constraints and output
+validation as the CP-SAT incumbent.
 
 Hard rules enforced (and independently re-checked by `validation.py` on every
 emitted schedule):
@@ -149,18 +150,24 @@ overrun past `planned_completion_date`.
 
 ### Reference-instance results
 
-CP-SAT proves all three optimal within the bounded model, in well under a second
-each.
+After the closure correction, all three scenarios pass internal validation with
+54 / 54 activities scheduled. A reference run using the default 15-second
+budget found the following optima within the bounded model:
 
 | scenario | feasible | activities scheduled | overrun days | ECLO | excess nights | objective |
 | -------- | -------- | -------------------- | ------------ | ---- | ------------- | --------- |
-| A | yes | 54 / 54 | 21 (C006 +14, C010 +7) | 0 | 0 | 25.2 |
+| A | yes | 54 / 54 | 28 (C006 +14, C010 +7, C014 +7) | 0 | 0 | 32.2 |
 | B | yes | 54 / 54 | 0 | 6 | 0 | 30.0 |
-| C | yes | 54 / 54 | 21 (C006 +14, C010 +7) | 0 | 0 | 25.2 |
+| C | yes | 54 / 54 | 14 (C006 +7, C010 +7) | 2 | 0 | 26.1 |
 
-`C` coincides with `A` on this instance: with the overrun weighted at 1/day for
-tier-3 contracts, neither an ECLO night (5) nor an excess access-night (7) buys
-enough schedule to pay for itself.
+Regression fixtures reproduce all 178 supplied external closure messages on
+the old exports exactly (A: 47, B: 84, C: 47). The external checker itself was
+not supplied, so this is observed-report compatibility, not certification
+against unseen checker rules. Equally optimal placements can vary by run.
+
+Persisted schedules from older validation versions are not restored as active.
+Their files are preserved; preview and implement a new schedule after upgrading.
+The API rejects activation of obsolete or infeasible previews.
 
 ### Documented modelling decisions
 
@@ -171,27 +178,29 @@ per-contract accounting index, independent of location). Consequences:
 * `supply_capacity` at a location-week is read as the number of possession
   slots (nights) available there that week. Excess access-nights are slots used
   beyond that capacity.
-* `co_share_group` (`night-N`) is the **physical night** witness: the label is
-  consistent across every location an activity occupies in a week, and across
-  activities, so `night-1` at two different locations in the same week is the
-  same night. `access_night` is then the rank of that slot among the nights the
-  contract uses that week.
+* `co_share_group` retains the `night-N` export spelling for compatibility,
+  but identifies a possession group, not an exemption from weekly closures.
+  A possession connects activities with the same label through shared worked
+  locations. Reusing a label at disjoint locations does not merge possessions.
+  `access_night` remains the local contract/type accounting index.
 * **One access per activity per week.** Each activity gets at most one night in
   any given week; a 5-access activity therefore spans at least 5 weeks. This is
   inherited from the baseline and is the main driver of overrun — revisit it if
   the specification permits several nights per week for one activity.
-* Buffer conflicts are evaluated at **night** granularity (same week, same
-  `co_share_group`) between the two activities' full closure footprints
-  (worked path + exclusion ring, on both bounds if mirrored). Two footprints that
-  overlap anywhere — including only at a shared platform between their rings —
-  may not share a night, **unless** the activities work a common location and
-  form a legal possession mix, in which case they co-share one possession. This
-  is stricter than "no work inside another's ring" and can cost packing
-  density; it never produces a breach.
-* A platform-only job books only that platform (not the two adjacent tunnels);
-  its exclusion ring extends `up_to_buffer_sectors` tunnel sectors in each
-  direction. A tunnel job's ring also includes the platforms bounding each
-  buffered sector.
+* Closures apply across **the whole week**. No activity outside a possession
+  may work inside the union of that possession's closure footprints. Different
+  group labels cannot separate these conflicts in time. Legal mixes are checked
+  separately at each worked location. Overlap of two empty buffer rings alone
+  is not a work/closure violation.
+* The optimizer conservatively requires each overlapping pair to share a worked
+  location and a legal group, or use separate weeks. The validator also accepts
+  transitive sharing through connected worked paths. This conservative search
+  restriction can exclude some feasible connected-group arrangements.
+* A platform-only job books only that platform. Non-Live exclusion rings add
+  `up_to_buffer_sectors` tunnel sectors in each direction without closing extra
+  platforms. Live closures also include the platforms bounding buffered sectors
+  and mirror onto both bounds. At H01–H02, the Live closure carries its full
+  buffer onto both lines, including the buffered platforms.
 * An activity's `lines_touched` (used for the Scenario C ECLO window) is
   derived from its full footprint, so a `Live` job at `H01_H02` consumes the
   ECLO window on both lines.
