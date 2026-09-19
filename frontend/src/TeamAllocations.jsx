@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Compass,
   MapPin,
   Route,
   Search,
@@ -15,10 +16,18 @@ import {
   XCircle,
 } from "lucide-react";
 
+import {
+  PROXIMITY_TIERS,
+  SVG_CENTER,
+  SVG_SIZE,
+  rowGeometry,
+} from "./allocation-viz.js";
+
 /* ------------------------------------------------------------------ *
  * Review Team Allocations — full-screen overlay                      *
  *   header : fleet-level summary metrics                             *
  *   body   : sortable / searchable / paginated allocation table      *
+ *            with per-row distance, bearing and spatial micro-viz    *
  * ------------------------------------------------------------------ */
 
 const PAGE_SIZE = 12;
@@ -28,22 +37,20 @@ const button =
 
 /** `key` drives sorting; `numeric` right-aligns and compares as a number. */
 const COLUMNS = [
-  { key: "worksite_location_id", label: "Worksite / Location", width: "w-[22%]" },
-  { key: "worksite_coords", label: "Worksite (X, Y)", numeric: true, width: "w-[11%]" },
-  { key: "team_id", label: "Assigned team", width: "w-[15%]" },
-  { key: "team_coords", label: "Team (X, Y)", numeric: true, width: "w-[11%]" },
-  { key: "travel_distance_km", label: "Travel distance", numeric: true, width: "w-[11%]" },
+  { key: "worksite_location_id", label: "Worksite / Location", width: "w-[24%]" },
+  { key: "team_id", label: "Assigned team", width: "w-[17%]" },
+  { key: "spatial", label: "Spatial relative position", width: "w-[17%]" },
+  { key: "travel_distance_km", label: "Travel distance", numeric: true, width: "w-[15%]" },
   { key: "closest_team_match", label: "Closest team?", width: "w-[13%]" },
-  { key: "expertise_match_pct", label: "Expertise tier & match", width: "w-[17%]" },
+  { key: "expertise_match_pct", label: "Expertise tier & match", width: "w-[14%]" },
 ];
 
-/** Values the table sorts on — the two coordinate columns sort by distance from the origin. */
+/** Values the table sorts on. */
 function sortValue(row, key) {
   switch (key) {
-    case "worksite_coords":
-      return Math.hypot(row.worksite_x ?? 0, row.worksite_y ?? 0);
-    case "team_coords":
-      return Math.hypot(row.team_x ?? 0, row.team_y ?? 0);
+    case "spatial":
+      // compass bearing from worksite to crew — the new axis this column adds
+      return rowGeometry(row, 1).bearing.theta;
     case "closest_team_match":
       return row.closest_team_match ? 1 : 0;
     case "expertise_match_pct":
@@ -90,6 +97,123 @@ function MatchBadge({ ok, yes, no }) {
 }
 
 /**
+ * Worksite at the centre, crew plotted by true bearing and scaled distance.
+ * Purely decorative to a screen reader — the same facts are in the text beside
+ * it — so the glyph is aria-hidden and the cell carries the description.
+ */
+function SpatialGlyph({ point, coLocated }) {
+  return (
+    <svg viewBox={`0 0 ${SVG_SIZE} ${SVG_SIZE}`} width={SVG_SIZE} height={SVG_SIZE}
+      aria-hidden="true" focusable="false" className="shrink-0">
+      {/* recessive centre rings: the worksite's own frame of reference */}
+      <circle cx={SVG_CENTER} cy={SVG_CENTER} r="15.5" fill="none" stroke="#1e293b" strokeWidth="1" />
+      <circle cx={SVG_CENTER} cy={SVG_CENTER} r="8" fill="none" stroke="#1e293b" strokeWidth="1" />
+      {!coLocated && (
+        <line x1={SVG_CENTER} y1={SVG_CENTER} x2={point.x} y2={point.y}
+          stroke="#94A3B8" strokeWidth="1" strokeDasharray="2,2" />
+      )}
+      {/* worksite — fixed blue dot at the origin */}
+      <circle cx={SVG_CENTER} cy={SVG_CENTER} r="3" fill="#3B82F6" />
+      {/* crew — ringed in the surface colour so it stays legible when it overlaps */}
+      <circle cx={point.x} cy={point.y} r="2.5" fill="#E2E8F0" stroke="#0f172a" strokeWidth="1" />
+    </svg>
+  );
+}
+
+/**
+ * One allocation row.
+ *
+ * `memo` keeps rows that did not change from re-rendering when an unrelated
+ * piece of modal state does (typing in the filter box, for instance), and the
+ * `useMemo` inside keeps the trigonometry off the render path entirely.
+ */
+const AllocationRow = memo(function AllocationRow({ row, maxDistance }) {
+  const geometry = useMemo(
+    () => rowGeometry(row, maxDistance),
+    [row, maxDistance],
+  );
+  const { dx, dy, bearing, point, tier, fillPercent } = geometry;
+
+  const spatialDescription = bearing.coLocated
+    ? `Crew based on the worksite`
+    : `Crew lies ${bearing.label} of the worksite, ${row.travel_distance_km.toFixed(2)} km away`;
+
+  return (
+    <tr className="border-t border-slate-800 hover:bg-slate-950/50">
+      {/* ---- worksite ---- */}
+      <td className="px-4 py-3">
+        <div className="font-mono text-[11px] text-slate-200">{row.worksite_location_id}</div>
+        <div className="mt-0.5 text-[10px] text-slate-500">
+          {row.contract_number}:{row.activity_id} · {row.activity_type} · P{row.activity_priority} · {row.worksite_locations} location{row.worksite_locations === 1 ? "" : "s"}
+        </div>
+      </td>
+
+      {/* ---- crew ---- */}
+      <td className="px-4 py-3">
+        <div className="font-mono text-[11px] text-slate-200">{row.team_id}</div>
+        <div className="mt-0.5 flex items-center gap-1 text-[10px] text-slate-500">
+          <MapPin className="h-2.5 w-2.5" /> {row.base_station_id} · {row.team_specialty}
+        </div>
+      </td>
+
+      {/* ---- spatial relative position ---- */}
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-2.5" title={spatialDescription}>
+          <SpatialGlyph point={point} coLocated={bearing.coLocated} />
+          <div className="min-w-0 leading-tight">
+            <div className="flex items-center gap-1 tabular-nums text-[11px] text-slate-200">
+              <span aria-hidden="true" className="text-sm text-slate-400">{bearing.arrow}</span>
+              <span>{bearing.label}</span>
+            </div>
+            <div className="mt-0.5 text-[10px] tabular-nums text-slate-500">
+              site {row.worksite_x}, {row.worksite_y}
+            </div>
+            <div className="text-[10px] tabular-nums text-slate-500">
+              crew {row.team_x}, {row.team_y}
+            </div>
+            <span className="sr-only">
+              {spatialDescription}. Offset {dx.toFixed(2)} km east, {dy.toFixed(2)} km north.
+            </span>
+          </div>
+        </div>
+      </td>
+
+      {/* ---- travel distance: pill + fill bar ---- */}
+      <td className="px-4 py-3">
+        <div className="flex flex-col items-end">
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] tabular-nums ${tier.pill}`}>
+            {row.travel_distance_km.toFixed(2)} km
+          </span>
+          <div className="h-1.5 w-full bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden mt-1"
+            role="img" aria-label={`${fillPercent.toFixed(0)} percent of the longest journey in this schedule`}>
+            <div className={`h-full rounded-full transition-all duration-300 ${tier.fill}`}
+              style={{ width: `${fillPercent}%` }} />
+          </div>
+        </div>
+      </td>
+
+      {/* ---- proximity to the nearest eligible crew ---- */}
+      <td className="px-4 py-3">
+        <MatchBadge ok={row.closest_team_match} yes="Closest" no={`+${row.detour_km.toFixed(2)} km`} />
+        {!row.closest_team_match && (
+          <div className="mt-1 font-mono text-[10px] text-slate-500">{row.closest_team_id} @ {row.closest_team_distance_km} km</div>
+        )}
+      </td>
+
+      {/* ---- expertise ---- */}
+      <td className="px-4 py-3">
+        <MatchBadge ok={row.expertise_match}
+          yes={`${row.expertise_tier} · ${row.expertise_match_pct}% match`}
+          no={`${row.expertise_tier} · ${row.expertise_match_pct}% match`} />
+        <div className="mt-1 text-[10px] text-slate-500">
+          Requires {row.required_tier_label} {row.required_specialty}
+        </div>
+      </td>
+    </tr>
+  );
+});
+
+/**
  * `allocation` is the backend's `allocation` block:
  * { teams_total, avg_travel_distance, expertise_match_rate, nearest_team_match_rate, team_allocations: [...] }
  */
@@ -107,6 +231,18 @@ export default function TeamAllocationsModal({ allocation, scenario, onClose }) 
     dialog.showModal();
     return () => { dialog.close(); previous?.focus(); };
   }, []);
+
+  /**
+   * Every bar and glyph is scaled against the longest journey in the run, so
+   * rows stay comparable. Falls back to the rows themselves if the backend
+   * did not report a maximum.
+   */
+  const maxDistance = useMemo(() => {
+    if (Number.isFinite(allocation?.max_travel_distance) && allocation.max_travel_distance > 0) {
+      return allocation.max_travel_distance;
+    }
+    return rows.reduce((max, r) => Math.max(max, r.travel_distance_km ?? 0), 0);
+  }, [allocation, rows]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -172,7 +308,7 @@ export default function TeamAllocationsModal({ allocation, scenario, onClose }) 
           </div>
         </div>
 
-        {/* ---------- filter bar ---------- */}
+        {/* ---------- filter bar + legend ---------- */}
         <div className="shrink-0 flex flex-wrap items-center gap-3 border-b border-slate-800 px-6 py-3">
           <div className="relative min-w-[240px] flex-1 max-w-sm">
             <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-500" />
@@ -182,6 +318,21 @@ export default function TeamAllocationsModal({ allocation, scenario, onClose }) 
               className="w-full rounded-lg bg-slate-950 pl-9 pr-3 py-2 text-xs text-slate-200 ring-1 ring-slate-700 outline-none focus:ring-sky-500" />
           </div>
           {query && <button onClick={() => { setQuery(""); setPage(0); }} className="text-[11px] text-slate-400 hover:text-white">Clear</button>}
+
+          {/* the distance bands the pills and bars encode, named rather than colour-only */}
+          <div className="flex items-center gap-3 text-[10px] text-slate-500">
+            <span className="inline-flex items-center gap-1"><Compass className="h-3 w-3" /> bearing from site to crew</span>
+            {PROXIMITY_TIERS.map((tier, i) => (
+              <span key={tier.id} className="inline-flex items-center gap-1.5">
+                <span className={`h-1.5 w-4 rounded-full ${tier.fill}`} />
+                {tier.label}
+                <span className="text-slate-600">
+                  {i === 0 ? "< 5 km" : i === 1 ? "5–12 km" : "> 12 km"}
+                </span>
+              </span>
+            ))}
+          </div>
+
           <span className="ml-auto text-[11px] text-slate-500" aria-live="polite">
             {sorted.length} of {rows.length} allocation{rows.length === 1 ? "" : "s"}
           </span>
@@ -199,45 +350,13 @@ export default function TeamAllocationsModal({ allocation, scenario, onClose }) 
             </div>
           ) : (
             <div className="overflow-x-auto rounded-xl ring-1 ring-slate-800">
-              <table className="w-full min-w-[980px] text-left text-xs">
+              <table className="w-full min-w-[1040px] text-left text-xs">
                 <thead className="sticky top-0 z-10 bg-slate-950 text-slate-500">
                   <tr>{COLUMNS.map((c) => <SortHeader key={c.key} column={c} sort={sort} onSort={toggleSort} />)}</tr>
                 </thead>
                 <tbody>
                   {visible.map((r) => (
-                    <tr key={r.activity_id} className="border-t border-slate-800 hover:bg-slate-950/50">
-                      <td className="px-4 py-3">
-                        <div className="font-mono text-[11px] text-slate-200">{r.worksite_location_id}</div>
-                        <div className="mt-0.5 text-[10px] text-slate-500">
-                          {r.contract_number}:{r.activity_id} · {r.activity_type} · P{r.activity_priority} · {r.worksite_locations} location{r.worksite_locations === 1 ? "" : "s"}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-300">{r.worksite_x}, {r.worksite_y}</td>
-                      <td className="px-4 py-3">
-                        <div className="font-mono text-[11px] text-slate-200">{r.team_id}</div>
-                        <div className="mt-0.5 flex items-center gap-1 text-[10px] text-slate-500">
-                          <MapPin className="h-2.5 w-2.5" /> {r.base_station_id} · {r.team_specialty}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums text-slate-300">{r.team_x}, {r.team_y}</td>
-                      <td className="px-4 py-3 text-right tabular-nums">
-                        <span className={r.travel_distance_km > (allocation?.avg_travel_distance ?? 0) * 2 ? "text-amber-300" : "text-slate-200"}>
-                          {r.travel_distance_km.toFixed(2)} km
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <MatchBadge ok={r.closest_team_match} yes="Closest" no={`+${r.detour_km.toFixed(2)} km`} />
-                        {!r.closest_team_match && (
-                          <div className="mt-1 font-mono text-[10px] text-slate-500">{r.closest_team_id} @ {r.closest_team_distance_km} km</div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <MatchBadge ok={r.expertise_match} yes={`${r.expertise_tier} · ${r.expertise_match_pct}% match`} no={`${r.expertise_tier} · ${r.expertise_match_pct}% match`} />
-                        <div className="mt-1 text-[10px] text-slate-500">
-                          Requires {r.required_tier_label} {r.required_specialty}
-                        </div>
-                      </td>
-                    </tr>
+                    <AllocationRow key={r.activity_id} row={r} maxDistance={maxDistance} />
                   ))}
                   {visible.length === 0 && (
                     <tr><td colSpan={COLUMNS.length} className="px-4 py-10 text-center text-slate-400">No allocation matches “{query}”.</td></tr>
